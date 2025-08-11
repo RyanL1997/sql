@@ -96,6 +96,7 @@ import org.opensearch.sql.ppl.antlr.parser.OpenSearchPPLParser.LookupPairContext
 import org.opensearch.sql.ppl.antlr.parser.OpenSearchPPLParser.StatsByClauseContext;
 import org.opensearch.sql.ppl.antlr.parser.OpenSearchPPLParserBaseVisitor;
 import org.opensearch.sql.ppl.utils.ArgumentFactory;
+import org.opensearch.sql.ast.tree.Regex;
 
 /** Class of building the AST. Refines the visit path and build the AST nodes */
 public class AstBuilder extends OpenSearchPPLParserBaseVisitor<UnresolvedPlan> {
@@ -686,6 +687,24 @@ public class AstBuilder extends OpenSearchPPLParserBaseVisitor<UnresolvedPlan> {
       throw new SemanticCheckException("subsearch should not be empty");
     }
     return new AppendCol(override, subsearch.get());
+  }
+
+  @Override
+  public UnresolvedPlan visitRegexCommand(OpenSearchPPLParser.RegexCommandContext ctx) {
+    UnresolvedExpression field = null;
+    String operator = null;
+    Literal pattern = (Literal) internalVisitExpression(ctx.regexExpr().pattern);
+
+    if (ctx.regexExpr().field != null) {
+      field = internalVisitExpression(ctx.regexExpr().field);
+    }
+    if (ctx.regexExpr().EQUAL() != null) {
+      operator = "=";
+    } else if (ctx.regexExpr().NOT_EQUAL() != null) {
+      operator = "!=";
+    }
+
+    return new Regex(field, operator, pattern);
   }
 
   /** Get original text in query. */
