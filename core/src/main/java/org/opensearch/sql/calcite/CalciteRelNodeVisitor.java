@@ -97,6 +97,7 @@ import org.opensearch.sql.ast.tree.Parse;
 import org.opensearch.sql.ast.tree.Patterns;
 import org.opensearch.sql.ast.tree.Project;
 import org.opensearch.sql.ast.tree.RareTopN;
+import org.opensearch.sql.ast.tree.Regex;
 import org.opensearch.sql.ast.tree.Relation;
 import org.opensearch.sql.ast.tree.Rename;
 import org.opensearch.sql.ast.tree.Sort;
@@ -166,6 +167,28 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     } else {
       context.relBuilder.filter(condition);
     }
+    return context.relBuilder.peek();
+  }
+
+  @Override
+  public RelNode visitRegex(Regex node, CalcitePlanContext context) {
+    visitChildren(node, context);
+    // For Calcite engine, use REGEXP function but the RegexMatch expression will be executed
+    // with PCRE2 support in the script engine during pushdown
+    List<UnresolvedExpression> args = new ArrayList<>();
+    args.add(node.getField());
+    args.add(node.getPattern());
+
+    // Use the standard REGEXP function - the PCRE2 execution happens in the script engine
+    Function regexFunction = new Function("regexp", args);
+    RexNode condition = rexVisitor.analyze(regexFunction, context);
+
+    // If negated, wrap with NOT
+    if (node.isNegated()) {
+      condition = context.rexBuilder.makeCall(SqlStdOperatorTable.NOT, condition);
+    }
+
+    context.relBuilder.filter(condition);
     return context.relBuilder.peek();
   }
 
