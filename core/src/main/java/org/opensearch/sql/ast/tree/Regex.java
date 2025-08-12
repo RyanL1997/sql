@@ -20,39 +20,38 @@ import org.opensearch.sql.ast.expression.UnresolvedExpression;
 @ToString
 @EqualsAndHashCode(callSuper = false)
 public class Regex extends UnresolvedPlan {
-    /** Field to match against. */
-    private final UnresolvedExpression field;
+  /** Field to match against. */
+  private final UnresolvedExpression field;
 
-    /** Whether this is a negated match (!=). */
-    private final boolean negated;
+  /** Whether this is a negated match (!=). */
+  private final boolean negated;
 
-    /** Pattern. */
-    private final Literal pattern;
+  /** Pattern. */
+  private final Literal pattern;
 
-    /** Child Plan. */
-    @Setter
-    private UnresolvedPlan child;
+  /** Child Plan. */
+  @Setter private UnresolvedPlan child;
 
-    public Regex(UnresolvedExpression field, String operator, Literal pattern) {
-        // Require explicit field - no default to _source for PoC
-        this.field = field;
-        this.negated = "!=".equals(operator);
-        this.pattern = pattern;
-    }
+  public Regex(UnresolvedExpression field, String operator, Literal pattern) {
+    // Require explicit field - no default to _source for PoC
+    this.field = field;
+    this.negated = "!=".equals(operator);
+    this.pattern = pattern;
+  }
 
-    @Override
-    public Regex attach(UnresolvedPlan child) {
-        this.child = child;
-        return this;
-    }
+  @Override
+  public Regex attach(UnresolvedPlan child) {
+    this.child = child;
+    return this;
+  }
 
-    @Override
-    public List<UnresolvedPlan> getChild() {
-        return this.child == null ? ImmutableList.of() : ImmutableList.of(this.child);
-    }
+  @Override
+  public List<UnresolvedPlan> getChild() {
+    return this.child == null ? ImmutableList.of() : ImmutableList.of(this.child);
+  }
 
-    @Override
-    public <T, C> T accept(AbstractNodeVisitor<T, C> nodeVisitor, C context) {
-        return nodeVisitor.visitRegex(this, context);
-    }
+  @Override
+  public <T, C> T accept(AbstractNodeVisitor<T, C> nodeVisitor, C context) {
+    return nodeVisitor.visitRegex(this, context);
+  }
 }

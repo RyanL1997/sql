@@ -73,6 +73,7 @@ import org.opensearch.sql.ast.tree.Patterns;
 import org.opensearch.sql.ast.tree.Project;
 import org.opensearch.sql.ast.tree.RareTopN;
 import org.opensearch.sql.ast.tree.RareTopN.CommandType;
+import org.opensearch.sql.ast.tree.Regex;
 import org.opensearch.sql.ast.tree.Relation;
 import org.opensearch.sql.ast.tree.Rename;
 import org.opensearch.sql.ast.tree.Reverse;
@@ -96,7 +97,6 @@ import org.opensearch.sql.ppl.antlr.parser.OpenSearchPPLParser.LookupPairContext
 import org.opensearch.sql.ppl.antlr.parser.OpenSearchPPLParser.StatsByClauseContext;
 import org.opensearch.sql.ppl.antlr.parser.OpenSearchPPLParserBaseVisitor;
 import org.opensearch.sql.ppl.utils.ArgumentFactory;
-import org.opensearch.sql.ast.tree.Regex;
 
 /** Class of building the AST. Refines the visit path and build the AST nodes */
 public class AstBuilder extends OpenSearchPPLParserBaseVisitor<UnresolvedPlan> {

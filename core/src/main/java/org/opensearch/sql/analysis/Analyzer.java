@@ -77,10 +77,10 @@ import org.opensearch.sql.ast.tree.Parse;
 import org.opensearch.sql.ast.tree.Patterns;
 import org.opensearch.sql.ast.tree.Project;
 import org.opensearch.sql.ast.tree.RareTopN;
+import org.opensearch.sql.ast.tree.Regex;
 import org.opensearch.sql.ast.tree.Relation;
 import org.opensearch.sql.ast.tree.RelationSubquery;
 import org.opensearch.sql.ast.tree.Rename;
-import org.opensearch.sql.ast.tree.Regex;
 import org.opensearch.sql.ast.tree.Reverse;
 import org.opensearch.sql.ast.tree.Sort;
 import org.opensearch.sql.ast.tree.Sort.SortOption;
@@ -692,10 +692,24 @@ public class Analyzer extends AbstractNodeVisitor<LogicalPlan, AnalysisContext> 
 
   @Override
   public LogicalPlan visitRegex(Regex node, AnalysisContext context) {
-    // For now, throw unsupported operation as we're building a PoC
-    // This will be implemented when we add the execution logic
-    throw new UnsupportedOperationException(
-        "REGEX command is not yet fully implemented");
+    // Get the child plan (source of data)
+    LogicalPlan child = node.getChild().get(0).accept(this, context);
+
+    // Analyze the field and pattern expressions
+    Expression fieldExpr = expressionAnalyzer.analyze(node.getField(), context);
+    Expression patternExpr = expressionAnalyzer.analyze(node.getPattern(), context);
+
+    // Create the RegexMatch expression directly
+    // This is our custom PCRE-based implementation
+    Expression regexExpr =
+        new org.opensearch.sql.expression.operator.predicate.RegexMatch(
+            fieldExpr, patternExpr, node.isNegated());
+
+    // Return a LogicalFilter with the regex condition
+    // No need for optimization since RegexMatch is already a concrete expression
+    LogicalFilter result = new LogicalFilter(child, regexExpr);
+
+    return result;
   }
 
   @Override

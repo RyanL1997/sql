@@ -57,6 +57,7 @@ class OpenSearchIndexScanQueryBuilder implements PushDownQueryBuilder {
   public boolean pushDownFilter(LogicalFilter filter) {
     FilterQueryBuilder queryBuilder = new FilterQueryBuilder(new DefaultExpressionSerializer());
     Expression queryCondition = filter.getCondition();
+
     try {
       QueryBuilder query = queryBuilder.build(queryCondition);
       requestBuilder.pushDownFilter(query);
