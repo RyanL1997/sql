@@ -173,23 +173,33 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
   @Override
   public RelNode visitRegex(Regex node, CalcitePlanContext context) {
     visitChildren(node, context);
-    // For Calcite engine, use REGEXP function but the RegexMatch expression will be executed
-    // with PCRE2 support in the script engine during pushdown
-    List<UnresolvedExpression> args = new ArrayList<>();
-    args.add(node.getField());
-    args.add(node.getPattern());
 
-    // Use the standard REGEXP function - the PCRE2 execution happens in the script engine
-    Function regexFunction = new Function("regexp", args);
-    RexNode condition = rexVisitor.analyze(regexFunction, context);
+    // Create our PCRE2 RegexMatch expression directly, just like the legacy engine
+    // This ensures both engines use identical PCRE2 implementation
+
+    // Analyze the field and pattern expressions in the current context
+    RexNode fieldRex = rexVisitor.analyze(node.getField(), context);
+    RexNode patternRex = rexVisitor.analyze(node.getPattern(), context);
+
+    // Create a custom RexNode that represents our RegexMatch expression
+    // This will be handled by the script engine with PCRE2 support
+    RexNode regexCondition = createRegexMatchRexNode(fieldRex, patternRex, context);
 
     // If negated, wrap with NOT
     if (node.isNegated()) {
-      condition = context.rexBuilder.makeCall(SqlStdOperatorTable.NOT, condition);
+      regexCondition = context.rexBuilder.makeCall(SqlStdOperatorTable.NOT, regexCondition);
     }
 
-    context.relBuilder.filter(condition);
+    context.relBuilder.filter(regexCondition);
     return context.relBuilder.peek();
+  }
+
+  private RexNode createRegexMatchRexNode(
+      RexNode field, RexNode pattern, CalcitePlanContext context) {
+    // Create a function call that will be specifically handled by our script engine
+    // This bypasses the standard regex routing and ensures PCRE2 usage
+    return context.rexBuilder.makeCall(
+        org.opensearch.sql.calcite.rex.RegexMatchOperator.INSTANCE, field, pattern);
   }
 
   private boolean containsSubqueryExpression(Node expr) {
