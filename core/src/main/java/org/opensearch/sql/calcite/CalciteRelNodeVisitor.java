@@ -196,10 +196,10 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
 
   private RexNode createRegexMatchRexNode(
       RexNode field, RexNode pattern, CalcitePlanContext context) {
-    // Create a function call that will be specifically handled by our script engine
-    // This bypasses the standard regex routing and ensures PCRE2 usage
+    // Use the UDF version that has proper enumerable implementation support
+    // This ensures PCRE2 usage for both pushdown and in-memory execution
     return context.rexBuilder.makeCall(
-        org.opensearch.sql.calcite.rex.RegexMatchOperator.INSTANCE, field, pattern);
+        org.opensearch.sql.expression.function.PPLBuiltinOperators.REGEX_MATCH, field, pattern);
   }
 
   private boolean containsSubqueryExpression(Node expr) {
