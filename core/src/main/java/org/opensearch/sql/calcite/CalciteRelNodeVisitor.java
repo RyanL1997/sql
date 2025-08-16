@@ -235,10 +235,21 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     } else {
       // Regular field specified
       RexNode fieldRex = rexVisitor.analyze(node.getField(), context);
+
+      // Check if the field needs to be cast to VARCHAR (SPL behavior)
+      RexNode stringFieldRex = fieldRex;
+      if (fieldRex.getType().getSqlTypeName() != SqlTypeName.VARCHAR
+          && fieldRex.getType().getSqlTypeName() != SqlTypeName.CHAR) {
+        // Cast non-string fields to VARCHAR for regex matching
+        stringFieldRex =
+            context.rexBuilder.makeCast(
+                context.relBuilder.getTypeFactory().createSqlType(SqlTypeName.VARCHAR), fieldRex);
+      }
+
       regexCondition =
           context.rexBuilder.makeCall(
               org.opensearch.sql.expression.function.PPLBuiltinOperators.REGEX_MATCH,
-              fieldRex,
+              stringFieldRex,
               patternRex);
     }
 
