@@ -174,16 +174,73 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
   public RelNode visitRegex(Regex node, CalcitePlanContext context) {
     visitChildren(node, context);
 
-    // Analyze the field and pattern expressions
-    RexNode fieldRex = rexVisitor.analyze(node.getField(), context);
     RexNode patternRex = rexVisitor.analyze(node.getPattern(), context);
+    RexNode regexCondition;
 
-    // Create RexNode using the REGEX_MATCH UDF
-    RexNode regexCondition =
-        context.rexBuilder.makeCall(
-            org.opensearch.sql.expression.function.PPLBuiltinOperators.REGEX_MATCH,
-            fieldRex,
-            patternRex);
+    if (node.getField() == null || isSourceField(node.getField())) {
+      // No field specified OR _source field specified - search across all fields
+      List<String> fieldNames = context.relBuilder.peek().getRowType().getFieldNames();
+      List<RexNode> fieldConditions = new ArrayList<>();
+
+      for (String fieldName : fieldNames) {
+        // Skip system fields
+        if (!fieldName.startsWith("_")) {
+          try {
+            RelDataTypeField field =
+                context.relBuilder.peek().getRowType().getField(fieldName, false, false);
+
+            RexNode fieldRef =
+                context.rexBuilder.makeInputRef(
+                    field.getType(),
+                    context.relBuilder.peek().getRowType().getFieldList().indexOf(field));
+
+            // Convert field to string if it's not already a string type (SPL behavior)
+            RexNode stringFieldRef = fieldRef;
+            if (field.getType().getSqlTypeName() != SqlTypeName.VARCHAR
+                && field.getType().getSqlTypeName() != SqlTypeName.CHAR) {
+              // Cast non-string fields to VARCHAR for regex matching
+              stringFieldRef =
+                  context.rexBuilder.makeCast(
+                      context.relBuilder.getTypeFactory().createSqlType(SqlTypeName.VARCHAR),
+                      fieldRef);
+            }
+
+            RexNode fieldCondition =
+                context.rexBuilder.makeCall(
+                    org.opensearch.sql.expression.function.PPLBuiltinOperators.REGEX_MATCH,
+                    stringFieldRef,
+                    patternRex);
+
+            fieldConditions.add(fieldCondition);
+          } catch (Exception e) {
+            // Skip fields that can't be accessed
+          }
+        }
+      }
+
+      if (fieldConditions.isEmpty()) {
+        // Fallback: if no fields found, create a condition that never matches
+        regexCondition = context.rexBuilder.makeLiteral(false);
+      } else if (fieldConditions.size() == 1) {
+        regexCondition = fieldConditions.get(0);
+      } else {
+        // Create OR condition: REGEX_MATCH(field1, pattern) OR REGEX_MATCH(field2, pattern) OR ...
+        regexCondition = fieldConditions.get(0);
+        for (int i = 1; i < fieldConditions.size(); i++) {
+          regexCondition =
+              context.rexBuilder.makeCall(
+                  SqlStdOperatorTable.OR, regexCondition, fieldConditions.get(i));
+        }
+      }
+    } else {
+      // Regular field specified
+      RexNode fieldRex = rexVisitor.analyze(node.getField(), context);
+      regexCondition =
+          context.rexBuilder.makeCall(
+              org.opensearch.sql.expression.function.PPLBuiltinOperators.REGEX_MATCH,
+              fieldRex,
+              patternRex);
+    }
 
     // If negated, wrap with NOT
     if (node.isNegated()) {
@@ -192,6 +249,13 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
 
     context.relBuilder.filter(regexCondition);
     return context.relBuilder.peek();
+  }
+
+  private boolean isSourceField(Node field) {
+    if (field == null) {
+      return false;
+    }
+    return field.toString().equals("_source");
   }
 
   private boolean containsSubqueryExpression(Node expr) {
