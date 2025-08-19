@@ -75,6 +75,7 @@ import org.opensearch.sql.ast.tree.ML;
 import org.opensearch.sql.ast.tree.Paginate;
 import org.opensearch.sql.ast.tree.Parse;
 import org.opensearch.sql.ast.tree.Patterns;
+import org.opensearch.sql.ast.tree.Rex;
 import org.opensearch.sql.ast.tree.Project;
 import org.opensearch.sql.ast.tree.RareTopN;
 import org.opensearch.sql.ast.tree.Regex;
@@ -107,6 +108,7 @@ import org.opensearch.sql.expression.function.BuiltinFunctionRepository;
 import org.opensearch.sql.expression.function.FunctionName;
 import org.opensearch.sql.expression.function.TableFunctionImplementation;
 import org.opensearch.sql.expression.parse.ParseExpression;
+import org.opensearch.sql.expression.parse.RexExpression;
 import org.opensearch.sql.planner.logical.LogicalAD;
 import org.opensearch.sql.planner.logical.LogicalAggregation;
 import org.opensearch.sql.planner.logical.LogicalCloseCursor;
@@ -461,6 +463,14 @@ public class Analyzer extends AbstractNodeVisitor<LogicalPlan, AnalysisContext> 
     return child;
   }
 
+  /** Build {@link RexExpression} to context and skip to child nodes. */
+  @Override
+  public LogicalPlan visitRex(Rex node, AnalysisContext context) {
+    LogicalPlan child = node.getChild().get(0).accept(this, context);
+    analyzeRexNode(node, context);
+    return child;
+  }
+
   // TODO: We may need to align output structure with Calcite's output structure
   @Override
   public LogicalPlan visitPatterns(Patterns node, AnalysisContext context) {
@@ -783,6 +793,27 @@ public class Analyzer extends AbstractNodeVisitor<LogicalPlan, AnalysisContext> 
               ParseExpression expr =
                   ParseUtils.createParseExpression(
                       parseMethod, sourceField, patternExpression, DSL.literal(group));
+              curEnv.define(new Symbol(Namespace.FIELD_NAME, group), expr.type());
+              context.getNamedParseExpressions().add(new NamedExpression(group, expr));
+            });
+  }
+
+  private void analyzeRexNode(Rex node, AnalysisContext context) {
+    Expression sourceField = expressionAnalyzer.analyze(node.getSourceField(), context);
+    String pattern = (String) node.getPattern().getValue();
+    Expression patternExpression = DSL.literal(pattern);
+    
+    // Get max_match parameter if specified, default to 1
+    final int maxMatch = node.getArguments().containsKey("max_match") ? 
+        Integer.parseInt(node.getArguments().get("max_match").getValue().toString()) : 1;
+    final String offsetField = node.getArguments().containsKey("offset_field") ? 
+        node.getArguments().get("offset_field").getValue().toString() : null;
+
+    TypeEnvironment curEnv = context.peek();
+    RexExpression.getNamedGroupCandidates(pattern)
+        .forEach(
+            group -> {
+              RexExpression expr = new RexExpression(sourceField, patternExpression, maxMatch, offsetField);
               curEnv.define(new Symbol(Namespace.FIELD_NAME, group), expr.type());
               context.getNamedParseExpressions().add(new NamedExpression(group, expr));
             });

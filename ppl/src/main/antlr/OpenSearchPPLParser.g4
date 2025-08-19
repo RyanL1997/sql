@@ -71,6 +71,7 @@ commands
    | flattenCommand
    | reverseCommand
    | regexCommand
+   | rexCommand
    ;
 
 commandName
@@ -103,6 +104,7 @@ commandName
    | EXPLAIN
    | REVERSE
    | REGEX
+   | REX
    ;
 
 searchCommand
@@ -181,6 +183,20 @@ regexExpr
     : pattern=stringLiteral
     | field=qualifiedName EQUAL pattern=stringLiteral
     | field=qualifiedName NOT_EQUAL pattern=stringLiteral
+    ;
+
+rexCommand
+    : REX rexExpr
+    ;
+
+rexExpr
+    : pattern=stringLiteral (rexParameter)*
+    | (FIELD EQUAL field=qualifiedName)? pattern=stringLiteral (rexParameter)*
+    ;
+
+rexParameter
+    : (MAX_MATCH EQUAL max_match=integerLiteral)
+    | (OFFSET_FIELD EQUAL offset_field=stringLiteral)
     ;
 
 patternsMethod
@@ -1148,6 +1164,9 @@ keywordsCanBeId
    | FROM
    | PATTERN
    | NEW_FIELD
+   | FIELD
+   | MAX_MATCH
+   | OFFSET_FIELD
    | METHOD
    | VARIABLE_COUNT_THRESHOLD
    | FREQUENCY_THRESHOLD_PERCENTAGE

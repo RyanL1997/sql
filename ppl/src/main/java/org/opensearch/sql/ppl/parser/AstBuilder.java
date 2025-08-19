@@ -76,6 +76,7 @@ import org.opensearch.sql.ast.tree.Project;
 import org.opensearch.sql.ast.tree.RareTopN;
 import org.opensearch.sql.ast.tree.RareTopN.CommandType;
 import org.opensearch.sql.ast.tree.Regex;
+import org.opensearch.sql.ast.tree.Rex;
 import org.opensearch.sql.ast.tree.Relation;
 import org.opensearch.sql.ast.tree.Rename;
 import org.opensearch.sql.ast.tree.Reverse;
@@ -727,6 +728,29 @@ public class AstBuilder extends OpenSearchPPLParserBaseVisitor<UnresolvedPlan> {
     }
 
     return new Regex(field, operator, pattern);
+  }
+
+  @Override
+  public UnresolvedPlan visitRexCommand(OpenSearchPPLParser.RexCommandContext ctx) {
+    UnresolvedExpression sourceField = null;
+    Literal pattern = (Literal) internalVisitExpression(ctx.rexExpr().pattern);
+    ImmutableMap.Builder<String, Literal> builder = ImmutableMap.builder();
+
+    if (ctx.rexExpr().field != null) {
+      sourceField = internalVisitExpression(ctx.rexExpr().field);
+    }
+
+    // Process rex parameters
+    for (OpenSearchPPLParser.RexParameterContext paramCtx : ctx.rexExpr().rexParameter()) {
+      if (paramCtx.max_match != null) {
+        builder.put("max_match", (Literal) internalVisitExpression(paramCtx.max_match));
+      }
+      if (paramCtx.offset_field != null) {
+        builder.put("offset_field", (Literal) internalVisitExpression(paramCtx.offset_field));
+      }
+    }
+
+    return new Rex(sourceField, pattern, builder.build());
   }
 
   /** Get original text in query. */

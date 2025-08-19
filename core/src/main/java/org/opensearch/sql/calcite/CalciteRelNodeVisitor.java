@@ -99,6 +99,7 @@ import org.opensearch.sql.ast.tree.Patterns;
 import org.opensearch.sql.ast.tree.Project;
 import org.opensearch.sql.ast.tree.RareTopN;
 import org.opensearch.sql.ast.tree.Regex;
+import org.opensearch.sql.ast.tree.Rex;
 import org.opensearch.sql.ast.tree.Relation;
 import org.opensearch.sql.ast.tree.Rename;
 import org.opensearch.sql.ast.tree.Sort;
@@ -189,6 +190,13 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     }
 
     context.relBuilder.filter(regexCondition);
+    return context.relBuilder.peek();
+  }
+
+  @Override
+  public RelNode visitRex(Rex node, CalcitePlanContext context) {
+    visitChildren(node, context);
+    buildRexRelNode(node, context);
     return context.relBuilder.peek();
   }
 
@@ -1434,6 +1442,46 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
         newFields.add(innerRex);
       }
     }
+    projectPlusOverriding(newFields, groupCandidates, context);
+  }
+
+  private void buildRexRelNode(Rex node, CalcitePlanContext context) {
+    RexNode sourceField = rexVisitor.analyze(node.getSourceField(), context);
+    String patternValue = (String) node.getPattern().getValue();
+    
+    // Get named capture groups from the pattern
+    List<String> groupCandidates = 
+        org.opensearch.sql.expression.parse.RexExpression.getNamedGroupCandidates(patternValue);
+    
+    if (groupCandidates.isEmpty()) {
+      throw new SemanticCheckException(
+          "Rex pattern must contain at least one named capture group: " + patternValue);
+    }
+    
+    // Create arguments for rex UDF
+    RexNode[] rexNodeList = new RexNode[] {
+      sourceField,
+      context.rexBuilder.makeLiteral(
+          patternValue, context.rexBuilder.getTypeFactory().createSqlType(SqlTypeName.VARCHAR), true)
+    };
+    
+    // Add max_match parameter if specified
+    if (node.getArguments().containsKey("max_match")) {
+      int maxMatch = Integer.parseInt(node.getArguments().get("max_match").getValue().toString());
+      rexNodeList = ArrayUtils.add(rexNodeList, 
+          context.rexBuilder.makeLiteral(maxMatch, 
+              context.rexBuilder.getTypeFactory().createSqlType(SqlTypeName.INTEGER), true));
+    }
+    
+    List<RexNode> newFields = new ArrayList<>();
+    for (String groupCandidate : groupCandidates) {
+      RexNode innerRex = PPLFuncImpTable.INSTANCE.resolve(
+          context.rexBuilder, 
+          BuiltinFunctionName.REX_EXTRACT, 
+          ArrayUtils.add(rexNodeList, context.relBuilder.literal(groupCandidate)));
+      newFields.add(innerRex);
+    }
+    
     projectPlusOverriding(newFields, groupCandidates, context);
   }
 

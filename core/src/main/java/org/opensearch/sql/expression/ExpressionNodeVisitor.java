@@ -12,6 +12,7 @@ import org.opensearch.sql.expression.conditional.cases.WhenClause;
 import org.opensearch.sql.expression.function.FunctionImplementation;
 import org.opensearch.sql.expression.operator.predicate.RegexMatch;
 import org.opensearch.sql.expression.parse.ParseExpression;
+import org.opensearch.sql.expression.parse.RexExpression;
 
 /**
  * Abstract visitor for expression tree nodes.
@@ -67,6 +68,10 @@ public abstract class ExpressionNodeVisitor<T, C> {
   }
 
   public T visitParse(ParseExpression node, C context) {
+    return visitNode(node, context);
+  }
+
+  public T visitRex(RexExpression node, C context) {
     return visitNode(node, context);
   }
 

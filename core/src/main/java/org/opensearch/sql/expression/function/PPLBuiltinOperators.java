@@ -383,6 +383,10 @@ public class PPLBuiltinOperators extends ReflectiveSqlOperatorTable {
       new NumberToStringFunction().toUDF("NUMBER_TO_STRING");
   public static final SqlOperator REGEX_MATCH = SqlLibraryOperators.REGEXP_CONTAINS;
 
+  // Rex field extraction operator for Calcite engine
+  public static final SqlOperator REX_EXTRACT =
+      new org.opensearch.sql.expression.function.udf.RexExtractFunctionImpl().toUDF("REX_EXTRACT");
+
   /**
    * Returns the PPL specific operator table, creating it if necessary.
    *
