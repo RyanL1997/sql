@@ -225,12 +225,14 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     }
 
     if (node.getOffsetField().isPresent()) {
+      int maxMatchValue = node.getMaxMatch().orElse(1);
       RexNode offsetCall =
           PPLFuncImpTable.INSTANCE.resolve(
               context.rexBuilder,
               BuiltinFunctionName.REX_OFFSET,
               fieldRex,
-              context.rexBuilder.makeLiteral(patternStr));
+              context.rexBuilder.makeLiteral(patternStr),
+              context.relBuilder.literal(maxMatchValue));
       newFields.add(offsetCall);
       newFieldNames.add(node.getOffsetField().get());
     }

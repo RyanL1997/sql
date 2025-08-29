@@ -34,7 +34,7 @@ public final class RexOffsetFunction extends ImplementorUDF {
 
   @Override
   public UDFOperandMetadata getOperandMetadata() {
-    return PPLOperandTypes.STRING_STRING;
+    return PPLOperandTypes.STRING_STRING_INTEGER;
   }
 
   private static class RexOffsetImplementor implements NotNullImplementor {
@@ -44,12 +44,13 @@ public final class RexOffsetFunction extends ImplementorUDF {
         RexToLixTranslator translator, RexCall call, List<Expression> translatedOperands) {
       Expression field = translatedOperands.get(0);
       Expression pattern = translatedOperands.get(1);
+      Expression maxMatch = translatedOperands.get(2);
 
-      return Expressions.call(RexOffsetFunction.class, "calculateOffsets", field, pattern);
+      return Expressions.call(RexOffsetFunction.class, "calculateOffsets", field, pattern, maxMatch);
     }
   }
 
-  public static String calculateOffsets(String text, String patternStr) {
+  public static String calculateOffsets(String text, String patternStr, int maxMatch) {
     if (text == null || patternStr == null) {
       return null;
     }
@@ -58,33 +59,37 @@ public final class RexOffsetFunction extends ImplementorUDF {
       Pattern pattern = Pattern.compile(patternStr);
       Matcher matcher = pattern.matcher(text);
 
-      if (!matcher.find()) {
-        return null;
-      }
-
-      List<String> offsetPairs = new java.util.ArrayList<>();
+      List<String> allOffsetPairs = new java.util.ArrayList<>();
 
       Pattern namedGroupPattern = Pattern.compile("\\(\\?<([^>]+)>");
       Matcher namedGroupMatcher = namedGroupPattern.matcher(patternStr);
-
-      int groupIndex = 1;
-
+      List<String> groupNames = new java.util.ArrayList<>();
       while (namedGroupMatcher.find()) {
-        String groupName = namedGroupMatcher.group(1);
+        groupNames.add(namedGroupMatcher.group(1));
+      }
 
-        if (groupIndex <= matcher.groupCount()) {
+      if (groupNames.isEmpty()) {
+        return null;
+      }
+
+      // Find matches up to maxMatch limit and collect offsets
+      int matchCount = 0;
+      int maxMatchLimit = (maxMatch > 0) ? maxMatch : Integer.MAX_VALUE;
+      
+      while (matcher.find() && matchCount < maxMatchLimit) {
+        for (int groupIndex = 1; groupIndex <= matcher.groupCount() && groupIndex <= groupNames.size(); groupIndex++) {
+          String groupName = groupNames.get(groupIndex - 1);
           int start = matcher.start(groupIndex);
           int end = matcher.end(groupIndex);
 
           if (start >= 0 && end >= 0) {
-            offsetPairs.add(groupName + "=" + start + "-" + (end - 1));
+            allOffsetPairs.add(groupName + "=" + start + "-" + (end - 1));
           }
         }
-        groupIndex++;
+        matchCount++;
       }
 
-      java.util.Collections.reverse(offsetPairs);
-      return offsetPairs.isEmpty() ? null : String.join("&", offsetPairs);
+      return allOffsetPairs.isEmpty() ? null : String.join("&", allOffsetPairs);
     } catch (Exception e) {
       return null;
     }

@@ -20,9 +20,9 @@ public class RexOffsetFunctionTest {
     String text = "user@domain.com";
     String pattern = "(?<username>\\w+)@(?<domain>\\w+)\\.(?<tld>\\w+)";
 
-    String result = RexOffsetFunction.calculateOffsets(text, pattern);
-    // user=0-3, domain=5-10, com=12-14 (but order is reversed)
-    assertEquals("tld=12-14&domain=5-10&username=0-3", result);
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 1);
+    // Groups appear in pattern order: username, domain, tld
+    assertEquals("username=0-3&domain=5-10&tld=12-14", result);
   }
 
   @Test
@@ -30,7 +30,7 @@ public class RexOffsetFunctionTest {
     String text = "hello world";
     String pattern = "(?<word>\\w+)";
 
-    String result = RexOffsetFunction.calculateOffsets(text, pattern);
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 1);
     assertEquals("word=0-4", result);
   }
 
@@ -39,8 +39,8 @@ public class RexOffsetFunctionTest {
     String text = "abc123";
     String pattern = "(?<letters>[a-z]+)(?<numbers>\\d+)";
 
-    String result = RexOffsetFunction.calculateOffsets(text, pattern);
-    assertEquals("numbers=3-5&letters=0-2", result);
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 1);
+    assertEquals("letters=0-2&numbers=3-5", result);
   }
 
   @Test
@@ -48,22 +48,22 @@ public class RexOffsetFunctionTest {
     String text = "This text has no digits";
     String pattern = "(?<digit>\\d+)";
 
-    String result = RexOffsetFunction.calculateOffsets(text, pattern);
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 1);
     assertNull(result);
   }
 
   @Test
   public void testCalculateOffsets_NullInputs() {
     // Null text
-    String result = RexOffsetFunction.calculateOffsets(null, "(?<test>\\w+)");
+    String result = RexOffsetFunction.calculateOffsets(null, "(?<test>\\w+)", 1);
     assertNull(result);
 
     // Null pattern
-    result = RexOffsetFunction.calculateOffsets("test text", null);
+    result = RexOffsetFunction.calculateOffsets("test text", null, 1);
     assertNull(result);
 
     // Both null
-    result = RexOffsetFunction.calculateOffsets(null, null);
+    result = RexOffsetFunction.calculateOffsets(null, null, 1);
     assertNull(result);
   }
 
@@ -72,7 +72,7 @@ public class RexOffsetFunctionTest {
     String text = "test string";
     String invalidPattern = "[unclosed";
 
-    String result = RexOffsetFunction.calculateOffsets(text, invalidPattern);
+    String result = RexOffsetFunction.calculateOffsets(text, invalidPattern, 1);
     assertNull(result);
   }
 
@@ -81,7 +81,7 @@ public class RexOffsetFunctionTest {
     String text = "";
     String pattern = "(?<word>\\w+)";
 
-    String result = RexOffsetFunction.calculateOffsets(text, pattern);
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 1);
     assertNull(result);
   }
 
@@ -90,7 +90,7 @@ public class RexOffsetFunctionTest {
     String text = "test123";
     String pattern = "(\\w+)(\\d+)";
 
-    String result = RexOffsetFunction.calculateOffsets(text, pattern);
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 1);
     assertNull(result);
   }
 
@@ -99,7 +99,7 @@ public class RexOffsetFunctionTest {
     String text = "a";
     String pattern = "(?<char>[a-z])";
 
-    String result = RexOffsetFunction.calculateOffsets(text, pattern);
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 1);
     assertEquals("char=0-0", result);
   }
 
@@ -108,8 +108,8 @@ public class RexOffsetFunctionTest {
     String text = "year 2023 month 12";
     String pattern = "(?<year>\\d{4}).*(?<month>\\d{2})";
 
-    String result = RexOffsetFunction.calculateOffsets(text, pattern);
-    assertEquals("month=16-17&year=5-8", result);
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 1);
+    assertEquals("year=5-8&month=16-17", result);
   }
 
   @Test
@@ -117,8 +117,8 @@ public class RexOffsetFunctionTest {
     String text = "email: john@example.org";
     String pattern = "(?<name>\\w+)@(?<domain>\\w+)\\.(?<ext>\\w+)";
 
-    String result = RexOffsetFunction.calculateOffsets(text, pattern);
-    assertEquals("ext=20-22&domain=12-18&name=7-10", result);
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 1);
+    assertEquals("name=7-10&domain=12-18&ext=20-22", result);
   }
 
   @Test
@@ -135,5 +135,32 @@ public class RexOffsetFunctionTest {
   public void testFunctionConstructor() {
     RexOffsetFunction testFunction = new RexOffsetFunction();
     assertNotNull(testFunction, "Function should be properly initialized");
+  }
+
+  @Test
+  public void testCalculateOffsets_MaxMatchMultiple() {
+    String text = "880 Holmes Lane";
+    String pattern = "(?<digit>\\d)";
+
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 2);
+    assertEquals("digit=0-0&digit=1-1", result);
+  }
+
+  @Test
+  public void testCalculateOffsets_MaxMatchUnlimited() {
+    String text = "880 Holmes Lane";
+    String pattern = "(?<digit>\\d)";
+
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 0);
+    assertEquals("digit=0-0&digit=1-1&digit=2-2", result);
+  }
+
+  @Test
+  public void testCalculateOffsets_MaxMatchExceedsAvailable() {
+    String text = "880";
+    String pattern = "(?<digit>\\d)";
+
+    String result = RexOffsetFunction.calculateOffsets(text, pattern, 10);
+    assertEquals("digit=0-0&digit=1-1&digit=2-2", result);
   }
 }
