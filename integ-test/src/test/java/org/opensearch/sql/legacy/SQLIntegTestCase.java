@@ -405,7 +405,15 @@ public abstract class SQLIntegTestCase extends OpenSearchSQLRestTestCase {
     String clusterUrl = System.getProperty("tests.rest.cluster");
     boolean isAoss = clusterUrl != null && clusterUrl.contains(".aoss.amazonaws.com");
 
+    // Debug logging
+    System.out.println("=== CLUSTER SETTINGS DEBUG ===");
+    System.out.println("Cluster URL: " + clusterUrl);
+    System.out.println("Is AOSS: " + isAoss);
+    System.out.println("Setting: " + setting.toString());
+    System.out.println("==============================");
+
     if (isAoss) {
+      System.out.println("🔄 SKIPPING cluster settings for AOSS");
       return new JSONObject("{}"); // Return empty JSON for AOSS
     }
 

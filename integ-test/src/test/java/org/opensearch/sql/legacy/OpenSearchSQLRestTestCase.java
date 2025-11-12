@@ -41,7 +41,6 @@ import org.opensearch.client.RequestOptions;
 import org.opensearch.client.Response;
 import org.opensearch.client.RestClient;
 import org.opensearch.client.RestClientBuilder;
-import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.common.util.io.IOUtils;
@@ -87,10 +86,17 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
   private static RestClient remoteAdminClient;
 
   protected boolean isHttps() {
+    String httpsProperty = System.getProperty("https");
     boolean isHttps =
-        Optional.ofNullable(System.getProperty("https"))
-            .map("true"::equalsIgnoreCase)
-            .orElse(false);
+        Optional.ofNullable(httpsProperty).map("true"::equalsIgnoreCase).orElse(false);
+
+    // Debug logging
+    System.out.println("=== HTTPS DETECTION DEBUG ===");
+    System.out.println("https property: " + httpsProperty);
+    System.out.println("isHttps: " + isHttps);
+    System.out.println("tests.rest.cluster: " + System.getProperty("tests.rest.cluster"));
+    System.out.println("=============================");
+
     if (isHttps) {
       // currently only external cluster is supported for security enabled testing
       if (!Optional.ofNullable(System.getProperty("tests.rest.cluster")).isPresent()) {
@@ -125,7 +131,13 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
     return remoteAdminClient;
   }
 
-  protected RestClient buildClient(Settings settings, HttpHost[] hosts) throws IOException {
+  @Override
+  protected RestClient buildClient(
+      org.opensearch.common.settings.Settings settings, HttpHost[] hosts) throws IOException {
+    System.out.println("CUSTOM buildClient() called for AOSS integration!");
+    System.out.println("Hosts: " + java.util.Arrays.toString(hosts));
+
+    // Build the client directly with AOSS/HTTPS detection
     RestClientBuilder builder = RestClient.builder(hosts);
     if (isHttps()) {
       configureHttpsClient(builder, settings, hosts[0]);
@@ -155,7 +167,8 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
       int port = Integer.parseInt(stringUrl.substring(portSeparator + 1));
       hosts.add(buildHttpHost(host, port));
     }
-    Settings.Builder builder = Settings.builder();
+    org.opensearch.common.settings.Settings.Builder builder =
+        org.opensearch.common.settings.Settings.builder();
     if (System.getProperty("tests.rest.client_path_prefix") != null) {
       builder.put(CLIENT_PATH_PREFIX, System.getProperty("tests.rest.client_path_prefix"));
     }
@@ -241,7 +254,8 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
    * Configure authentication and pass <b>builder</b> to superclass to configure other stuff.<br>
    * By default, auth is configure when <b>https</b> is set only.
    */
-  protected static void configureClient(RestClientBuilder builder, Settings settings)
+  protected static void configureClient(
+      RestClientBuilder builder, org.opensearch.common.settings.Settings settings)
       throws IOException {
     String userName = System.getProperty("user");
     String password = System.getProperty("password");
@@ -259,7 +273,10 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
   }
 
   protected static void configureHttpsClient(
-      RestClientBuilder builder, Settings settings, HttpHost httpHost) throws IOException {
+      RestClientBuilder builder,
+      org.opensearch.common.settings.Settings settings,
+      HttpHost httpHost)
+      throws IOException {
     Map<String, String> headers = ThreadContext.buildDefaultHeaders(settings);
     Header[] defaultHeaders = new Header[headers.size()];
     int i = 0;
@@ -291,7 +308,10 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
    * authentication.
    */
   private static void configureAwsClient(
-      RestClientBuilder builder, Settings settings, HttpHost httpHost) throws IOException {
+      RestClientBuilder builder,
+      org.opensearch.common.settings.Settings settings,
+      HttpHost httpHost)
+      throws IOException {
     builder.setHttpClientConfigCallback(
         httpClientBuilder -> {
           try {
@@ -331,7 +351,10 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
 
   /** Configure HTTP client for regular OpenSearch using basic authentication. */
   private static void configureBasicAuthClient(
-      RestClientBuilder builder, Settings settings, HttpHost httpHost) throws IOException {
+      RestClientBuilder builder,
+      org.opensearch.common.settings.Settings settings,
+      HttpHost httpHost)
+      throws IOException {
     builder.setHttpClientConfigCallback(
         httpClientBuilder -> {
           String userName =
