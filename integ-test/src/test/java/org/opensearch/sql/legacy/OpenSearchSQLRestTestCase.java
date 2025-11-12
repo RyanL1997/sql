@@ -49,6 +49,7 @@ import org.opensearch.common.xcontent.XContentFactory;
 import org.opensearch.core.rest.RestStatus;
 import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.script.ScriptService;
+import org.opensearch.sql.AwsHttpRequestInterceptor;
 import org.opensearch.test.rest.OpenSearchRestTestCase;
 
 /**
@@ -260,6 +261,71 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
       defaultHeaders[i++] = new BasicHeader(entry.getKey(), entry.getValue());
     }
     builder.setDefaultHeaders(defaultHeaders);
+
+    // Detect AOSS endpoint and configure appropriate authentication
+    if (httpHost.getHostName().contains(".aoss.amazonaws.com")) {
+      // Configure for Amazon OpenSearch Serverless (AOSS) with AWS Signature V4
+      LOG.info(
+          "Detected AOSS endpoint: "
+              + httpHost.getHostName()
+              + ". Using AWS Signature V4 authentication.");
+      configureAwsClient(builder, settings, httpHost);
+    } else {
+      // Configure for regular OpenSearch with basic authentication
+      LOG.info(
+          "Detected regular OpenSearch endpoint: "
+              + httpHost.getHostName()
+              + ". Using basic authentication.");
+      configureBasicAuthClient(builder, settings, httpHost);
+    }
+  }
+
+  /**
+   * Configure HTTP client for Amazon OpenSearch Serverless (AOSS) using AWS Signature V4
+   * authentication.
+   */
+  private static void configureAwsClient(
+      RestClientBuilder builder, Settings settings, HttpHost httpHost) throws IOException {
+    builder.setHttpClientConfigCallback(
+        httpClientBuilder -> {
+          try {
+            final TlsStrategy tlsStrategy =
+                ClientTlsStrategyBuilder.create()
+                    .setSslContext(
+                        SSLContextBuilder.create()
+                            .loadTrustMaterial(null, (chains, authType) -> true)
+                            .build())
+                    .setHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+                    .build();
+
+            return httpClientBuilder
+                .addRequestInterceptorLast(new AwsHttpRequestInterceptor())
+                .setConnectionManager(
+                    PoolingAsyncClientConnectionManagerBuilder.create()
+                        .setTlsStrategy(tlsStrategy)
+                        .build());
+          } catch (Exception e) {
+            throw new RuntimeException("Failed to configure AWS client for AOSS", e);
+          }
+        });
+
+    // Add socket timeout and path prefix configuration (same as basic auth)
+    final String socketTimeoutString = settings.get(CLIENT_SOCKET_TIMEOUT);
+    final TimeValue socketTimeout =
+        TimeValue.parseTimeValue(
+            socketTimeoutString == null ? "60s" : socketTimeoutString, CLIENT_SOCKET_TIMEOUT);
+    builder.setRequestConfigCallback(
+        conf ->
+            conf.setResponseTimeout(
+                Timeout.ofMilliseconds(Math.toIntExact(socketTimeout.getMillis()))));
+    if (settings.hasValue(CLIENT_PATH_PREFIX)) {
+      builder.setPathPrefix(settings.get(CLIENT_PATH_PREFIX));
+    }
+  }
+
+  /** Configure HTTP client for regular OpenSearch using basic authentication. */
+  private static void configureBasicAuthClient(
+      RestClientBuilder builder, Settings settings, HttpHost httpHost) throws IOException {
     builder.setHttpClientConfigCallback(
         httpClientBuilder -> {
           String userName =
