@@ -102,6 +102,12 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
     return isHttps;
   }
 
+  /** Check if we're running against Amazon OpenSearch Serverless (AOSS) */
+  protected boolean isAossCluster() {
+    String clusterUrl = System.getProperty("tests.rest.cluster");
+    return clusterUrl != null && clusterUrl.contains(".aoss.amazonaws.com");
+  }
+
   protected String getProtocol() {
     return isHttps() ? "https" : "http";
   }
@@ -396,6 +402,11 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
    * @throws IOException if there is an error retrieving cluster settings or updating them
    */
   protected void increaseMaxCompilationsRate() throws IOException {
+    // Skip script compilation rate configuration for AOSS
+    if (isAossCluster()) {
+      return; // AOSS doesn't support cluster settings or script context APIs
+    }
+
     // When script.disable_max_compilations_rate is set, custom context compilation rates cannot be
     // set
     if (!Objects.equals(
@@ -447,6 +458,15 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
   }
 
   protected static JSONObject getAllClusterSettings() throws IOException {
+    // Skip cluster settings retrieval for AOSS as it doesn't support this API
+    String clusterUrl = System.getProperty("tests.rest.cluster");
+    boolean isAoss = clusterUrl != null && clusterUrl.contains(".aoss.amazonaws.com");
+
+    if (isAoss) {
+      // Return a mock settings object with default values for AOSS
+      return new JSONObject("{\"persistent\":{},\"transient\":{},\"defaults\":{}}");
+    }
+
     Request request = new Request("GET", "/_cluster/settings?flat_settings&include_defaults");
     RequestOptions.Builder restOptionsBuilder = RequestOptions.DEFAULT.toBuilder();
     restOptionsBuilder.addHeader("Content-Type", "application/json");
@@ -455,6 +475,24 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
   }
 
   protected static String getClusterSetting(String settingPath, String type) throws IOException {
+    // For AOSS, return appropriate default values for commonly checked settings
+    String clusterUrl = System.getProperty("tests.rest.cluster");
+    boolean isAoss = clusterUrl != null && clusterUrl.contains(".aoss.amazonaws.com");
+
+    if (isAoss) {
+      // Return sensible defaults for AOSS
+      if (settingPath.contains("calcite.engine.enabled")) {
+        return "false"; // Assume calcite is disabled for AOSS by default
+      }
+      if (settingPath.contains("calcite.pushdown.enabled")) {
+        return "true"; // Assume pushdown is enabled for AOSS by default
+      }
+      if (settingPath.contains("script.disable_max_compilations_rate")) {
+        return "true"; // Assume script rate limiting is disabled for AOSS
+      }
+      return ""; // Default empty value for other settings
+    }
+
     JSONObject settings = getAllClusterSettings();
     String value = settings.optJSONObject(type).optString(settingPath);
     if (StringUtils.isEmpty(value)) {

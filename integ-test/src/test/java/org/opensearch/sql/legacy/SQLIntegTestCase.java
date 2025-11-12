@@ -57,7 +57,8 @@ public abstract class SQLIntegTestCase extends OpenSearchSQLRestTestCase {
       Integer.parseInt(System.getProperty("defaultMaxResultWindow", "10000"));
 
   public boolean shouldResetQuerySizeLimit() {
-    return true;
+    // Skip cluster configuration for AOSS as it doesn't support /_cluster/settings
+    return !isAossCluster();
   }
 
   @Before
@@ -174,6 +175,14 @@ public abstract class SQLIntegTestCase extends OpenSearchSQLRestTestCase {
   }
 
   protected static void wipeAllClusterSettings() throws IOException {
+    // Skip cluster settings cleanup for AOSS as it doesn't support /_cluster/settings
+    String clusterUrl = System.getProperty("tests.rest.cluster");
+    boolean isAoss = clusterUrl != null && clusterUrl.contains(".aoss.amazonaws.com");
+
+    if (isAoss) {
+      return; // AOSS doesn't support cluster settings modification
+    }
+
     updateClusterSettings(new ClusterSetting("persistent", "*", null));
     updateClusterSettings(new ClusterSetting("transient", "*", null));
     if (remoteClient() != null) {
@@ -392,6 +401,14 @@ public abstract class SQLIntegTestCase extends OpenSearchSQLRestTestCase {
 
   protected static JSONObject updateClusterSettings(ClusterSetting setting, RestClient client)
       throws IOException {
+    // Skip cluster settings updates for AOSS as it doesn't support /_cluster/settings
+    String clusterUrl = System.getProperty("tests.rest.cluster");
+    boolean isAoss = clusterUrl != null && clusterUrl.contains(".aoss.amazonaws.com");
+
+    if (isAoss) {
+      return new JSONObject("{}"); // Return empty JSON for AOSS
+    }
+
     Request request = new Request("PUT", "/_cluster/settings");
     String persistentSetting =
         String.format(

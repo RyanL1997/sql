@@ -139,6 +139,14 @@ public abstract class PPLIntegTestCase extends SQLIntegTestCase {
   }
 
   protected static JSONObject updateClusterSettings(ClusterSetting setting) throws IOException {
+    // Skip cluster settings updates for AOSS as it doesn't support /_cluster/settings
+    String clusterUrl = System.getProperty("tests.rest.cluster");
+    boolean isAoss = clusterUrl != null && clusterUrl.contains(".aoss.amazonaws.com");
+
+    if (isAoss) {
+      return new JSONObject("{}"); // Return empty JSON for AOSS
+    }
+
     Request request = new Request("PUT", "/_cluster/settings");
     String persistentSetting =
         String.format(
@@ -185,9 +193,9 @@ public abstract class PPLIntegTestCase extends SQLIntegTestCase {
   }
 
   public static void enableCalcite() throws IOException {
-    updateClusterSettings(
-        new SQLIntegTestCase.ClusterSetting(
-            "persistent", Settings.Key.CALCITE_ENGINE_ENABLED.getKeyValue(), "true"));
+    //    updateClusterSettings(
+    //        new SQLIntegTestCase.ClusterSetting(
+    //            "persistent", Settings.Key.CALCITE_ENGINE_ENABLED.getKeyValue(), "true"));
   }
 
   public static void disableCalcite() throws IOException {

@@ -794,4 +794,6 @@ task integTestRemote(type: RestIntegTestTask) {
     exclude 'org/opensearch/sql/legacy/QueryAnalysisIT.class'
     exclude 'org/opensearch/sql/legacy/OrderIT.class'
     exclude 'org/opensearch/sql/jdbc/**'
+    // Exclude AsyncQueryIT for AOSS - uses unsupported APIs like _nodes/plugins, _cat/indices
+    exclude 'org/opensearch/sql/asyncquery/AsyncQueryIT.class'
 }
