@@ -106,10 +106,32 @@ public class QueryService {
                       CalcitePlanContext context =
                           CalcitePlanContext.create(
                               buildFrameworkConfig(), SysLimit.fromSettings(settings), queryType);
+
+                      long analyzeStart = System.nanoTime();
                       RelNode relNode = analyze(plan, context);
+                      long analyzeTime = System.nanoTime() - analyzeStart;
+
+                      long mergeStart = System.nanoTime();
                       relNode = mergeAdjacentFilters(relNode);
+                      long mergeTime = System.nanoTime() - mergeStart;
+
+                      long optimizeStart = System.nanoTime();
                       RelNode optimized = optimize(relNode, context);
+                      long optimizeTime = System.nanoTime() - optimizeStart;
+
+                      long convertStart = System.nanoTime();
                       RelNode calcitePlan = convertToCalcitePlan(optimized);
+                      long convertTime = System.nanoTime() - convertStart;
+
+                      long totalPlanningTime = analyzeTime + mergeTime + optimizeTime + convertTime;
+
+                      // Use System.out to ensure capture in test logs
+                      String perfLog = String.format("PERF [Planning] analyze=%dμs, filterMerge=%dμs, optimize=%dμs, convert=%dμs, total=%dμs",
+                          analyzeTime / 1000, mergeTime / 1000, optimizeTime / 1000,
+                          convertTime / 1000, totalPlanningTime / 1000);
+                      System.out.println(perfLog);
+                      log.info(perfLog);
+
                       executionEngine.execute(calcitePlan, context, listener);
                       return null;
                     });
