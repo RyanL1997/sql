@@ -98,6 +98,7 @@ import org.opensearch.sql.opensearch.storage.script.CompoundedScriptEngine;
 import org.opensearch.sql.plugin.config.EngineExtensionsHolder;
 import org.opensearch.sql.plugin.config.OpenSearchPluginModule;
 import org.opensearch.sql.plugin.rest.RestPPLGrammarAction;
+import org.opensearch.sql.plugin.rest.RestPPLLintAction;
 import org.opensearch.sql.plugin.rest.RestPPLQueryAction;
 import org.opensearch.sql.plugin.rest.RestPPLStatsAction;
 import org.opensearch.sql.plugin.rest.RestQuerySettingsAction;
@@ -185,6 +186,7 @@ public class SQLPlugin extends Plugin
     return Arrays.asList(
         new RestPPLQueryAction(),
         new RestPPLGrammarAction(),
+        new RestPPLLintAction(),
         new RestSqlAction(settings, injector),
         new RestSqlStatsAction(settings, restController),
         new RestPPLStatsAction(settings, restController),
