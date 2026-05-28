@@ -5,9 +5,14 @@
 
 package org.opensearch.sql.ppl.calcite;
 
+import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.CoreMatchers.not;
+import static org.hamcrest.MatcherAssert.assertThat;
+
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.test.CalciteAssert;
 import org.junit.Test;
+import org.opensearch.sql.calcite.utils.CalciteToolsHelper;
 
 public class CalcitePPLDedupTest extends CalcitePPLAbstractTest {
 
@@ -352,5 +357,60 @@ public class CalcitePPLDedupTest extends CalcitePPLAbstractTest {
             + "          LogicalSort(sort0=[$7], dir0=[ASC-nulls-first])\n"
             + "            LogicalTableScan(table=[[scott, EMP]])\n";
     verifyLogical(root, expectedLogical);
+  }
+
+  /**
+   * Regression test for opensearch-project/sql#5482. When a user {@code where} clause sits between
+   * the analyzer-inserted bucket-non-null filter and the table scan, {@link
+   * org.opensearch.sql.calcite.plan.rule.PPLSimplifyDedupRule} must reliably fold the dedup pattern
+   * into a {@link org.opensearch.sql.calcite.plan.rel.LogicalDedup}.
+   *
+   * <p>The previous HEP program registered {@code FilterMergeRule} and {@code PPLSimplifyDedupRule}
+   * in a single rule collection, which uses {@code MatchOrder.ARBITRARY}. Whichever rule the
+   * planner happened to fire first determined the outcome: if {@code FilterMergeRule} fired first,
+   * it merged the user predicate with the bucket-non-null filter, the merged condition no longer
+   * satisfied {@code mayBeFilterFromBucketNonNull}, and {@code PPLSimplifyDedupRule} could no
+   * longer match. After the fix the two rules are scheduled as separate instructions in dedup-first
+   * order so {@code PPLSimplifyDedupRule} always runs to fixpoint against the original
+   * adjacent-filter shape.
+   */
+  /**
+   * Regression test for opensearch-project/sql#5482. When a user {@code where} clause sits between
+   * the analyzer-inserted bucket-non-null filter and the table scan, {@link
+   * org.opensearch.sql.calcite.plan.rule.PPLSimplifyDedupRule} must reliably fold the dedup pattern
+   * into a {@link org.opensearch.sql.calcite.plan.rel.LogicalDedup}.
+   *
+   * <p>The previous HEP program registered {@code FilterMergeRule} and {@code PPLSimplifyDedupRule}
+   * in a single rule collection, which uses {@code MatchOrder.ARBITRARY}. Whichever rule the
+   * planner happened to fire first determined the outcome: if {@code FilterMergeRule} fired first,
+   * it merged the user predicate with the bucket-non-null filter, the merged condition no longer
+   * satisfied {@code mayBeFilterFromBucketNonNull}, and {@code PPLSimplifyDedupRule} could no
+   * longer match. After the fix the two rules are scheduled as separate instructions in dedup-first
+   * order so {@code PPLSimplifyDedupRule} always runs to fixpoint against the original
+   * adjacent-filter shape.
+   */
+  @Test
+  public void testDedupAfterWhereSimplifiesToLogicalDedup() {
+    String ppl = "source=EMP | where DEPTNO > 10 | dedup 1 DEPTNO | fields DEPTNO";
+    // Use the analyzer plan WITHOUT the test's auxiliary FilterMerge step; the production HEP
+    // (CalciteToolsHelper.optimize) is responsible for filter merging.
+    RelNode analyzerPlan = getAnalyzerRelNode(ppl);
+    String analyzerExplain = analyzerPlan.explain();
+    // Sanity: the analyzer plan still has the un-merged adjacent filters (bucket-non-null over
+    // user where).
+    assertThat(analyzerExplain, containsString("LogicalFilter(condition=[IS NOT NULL($7)])"));
+    assertThat(analyzerExplain, containsString("LogicalFilter(condition=[>($7, 10)])"));
+    assertThat(analyzerExplain, not(containsString("LogicalDedup")));
+
+    RelNode optimized = CalciteToolsHelper.optimize(analyzerPlan, null);
+    String optimizedExplain = optimized.explain();
+    // PPLSimplifyDedupRule must have produced a LogicalDedup (otherwise the dedup falls through
+    // to a coordinator-side ROW_NUMBER window and dedup pushdown is disabled).
+    assertThat(optimizedExplain, containsString("LogicalDedup"));
+    // The user predicate must survive (it is now a sibling filter under the dedup, not merged
+    // away or dropped by the simplify rule).
+    assertThat(optimizedExplain, containsString(">($7, 10)"));
+    // The ROW_NUMBER window is gone - the dedup has been folded.
+    assertThat(optimizedExplain, not(containsString("ROW_NUMBER")));
   }
 }

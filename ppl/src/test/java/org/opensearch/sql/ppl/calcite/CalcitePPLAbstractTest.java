@@ -110,6 +110,19 @@ public class CalcitePPLAbstractTest {
     return root;
   }
 
+  /**
+   * Get the root RelNode straight from analysis, without the test's auxiliary {@link
+   * FilterMergeRule} pass. Use this when the test needs to assert behavior that depends on the
+   * production {@link org.opensearch.sql.calcite.utils.CalciteToolsHelper#optimize HEP optimize}
+   * flow seeing the un-merged adjacent-filter shape.
+   */
+  public RelNode getAnalyzerRelNode(String ppl) {
+    CalcitePlanContext context = createBuilderContext();
+    Query query = (Query) plan(pplParser, ppl);
+    planTransformer.analyze(query.getPlan(), context);
+    return context.relBuilder.build();
+  }
+
   private RelNode mergeAdjacentFilters(RelNode relNode) {
     HepProgram program =
         new HepProgramBuilder().addRuleInstance(FilterMergeRule.Config.DEFAULT.toRule()).build();

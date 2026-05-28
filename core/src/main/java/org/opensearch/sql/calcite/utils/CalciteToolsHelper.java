@@ -36,7 +36,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Instant;
-import java.util.List;
 import java.util.Properties;
 import java.util.function.Consumer;
 import org.apache.calcite.adapter.enumerable.EnumerableConvention;
@@ -59,7 +58,6 @@ import org.apache.calcite.plan.Contexts;
 import org.apache.calcite.plan.Convention;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptPlanner;
-import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptSchema;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.RelOptTable.ViewExpander;
@@ -551,12 +549,30 @@ public class CalciteToolsHelper {
     }
   }
 
-  /** Try to optimize the plan by using HepPlanner */
-  private static final List<RelOptRule> hepRuleList =
-      List.of(FilterMergeRule.Config.DEFAULT.toRule(), PPLSimplifyDedupRule.DEDUP_SIMPLIFY_RULE);
-
+  /**
+   * Try to optimize the plan by using HepPlanner.
+   *
+   * <p>The two rules MUST run as separate instructions in this order: {@link
+   * PPLSimplifyDedupRule#DEDUP_SIMPLIFY_RULE} first, {@link FilterMergeRule} second. {@code
+   * PPLSimplifyDedupRule} matches a four-operator pattern terminating in a {@link
+   * org.apache.calcite.rel.logical.LogicalFilter} whose condition is a pure {@code IS_NOT_NULL} (or
+   * {@code AND}-of-{@code IS_NOT_NULL}s) on the partition columns - the bucket-non-null filter the
+   * dedup analyzer inserts directly above the scan. When a user {@code where} clause sits between
+   * the bucket-non-null filter and the scan, those two filters are adjacent. If {@code
+   * FilterMergeRule} runs first, it folds them into a single filter whose condition is {@code
+   * AND(IS_NOT_NULL(field), <user predicate>)}; that condition no longer satisfies {@link
+   * org.opensearch.sql.calcite.utils.PlanUtils#mayBeFilterFromBucketNonNull} and {@code
+   * PPLSimplifyDedupRule} never matches. The {@code LogicalDedup} is therefore not produced and
+   * {@code DedupPushdownRule} cannot push the dedup down to the scan as a {@code composite +
+   * top_hits} aggregation; the dedup falls through to a coordinator-side {@code ROW_NUMBER} window.
+   * Putting {@code PPLSimplifyDedupRule} in its own instruction guarantees it runs to fixpoint
+   * against the original adjacent-filter shape before any merge happens.
+   */
   private static final HepProgram HEP_PROGRAM =
-      new HepProgramBuilder().addRuleCollection(hepRuleList).build();
+      new HepProgramBuilder()
+          .addRuleInstance(PPLSimplifyDedupRule.DEDUP_SIMPLIFY_RULE)
+          .addRuleInstance(FilterMergeRule.Config.DEFAULT.toRule())
+          .build();
 
   public static RelNode optimize(RelNode plan, CalcitePlanContext context) {
     Util.discard(context);
