@@ -36,7 +36,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Instant;
-import java.util.List;
 import java.util.Properties;
 import java.util.function.Consumer;
 import org.apache.calcite.adapter.enumerable.EnumerableConvention;
@@ -59,7 +58,6 @@ import org.apache.calcite.plan.Contexts;
 import org.apache.calcite.plan.Convention;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptPlanner;
-import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptSchema;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.RelOptTable.ViewExpander;
@@ -551,12 +549,26 @@ public class CalciteToolsHelper {
     }
   }
 
-  /** Try to optimize the plan by using HepPlanner */
-  private static final List<RelOptRule> hepRuleList =
-      List.of(FilterMergeRule.Config.DEFAULT.toRule(), PPLSimplifyDedupRule.DEDUP_SIMPLIFY_RULE);
-
+  /**
+   * Try to optimize the plan by using HepPlanner.
+   *
+   * <p>Rule order matters: {@link PPLSimplifyDedupRule#DEDUP_SIMPLIFY_RULE} must run to fixpoint
+   * before {@link FilterMergeRule}. The simplify rule's bottom operand only matches a pure {@code
+   * IS NOT NULL} (or AND-of-{@code IS NOT NULL}) bucket-non-null filter; if {@code FilterMergeRule}
+   * runs first when a user {@code WHERE} sits below the synthetic {@code IS NOT NULL} filter that
+   * PPL emits as part of {@code dedup}, the two adjacent filters are merged into a single filter
+   * whose condition includes the user predicate, the simplify rule's predicate fails, no {@link
+   * org.opensearch.sql.calcite.plan.rel.LogicalDedup} is produced, and dedup pushdown to the
+   * OpenSearch storage engine is silently disabled. Using separate {@code addRuleInstance} calls
+   * (rather than {@code addRuleCollection}) enforces deterministic ordering: dedup simplification
+   * fires first against the original adjacent-filter shape, then any remaining adjacent filters are
+   * merged.
+   */
   private static final HepProgram HEP_PROGRAM =
-      new HepProgramBuilder().addRuleCollection(hepRuleList).build();
+      new HepProgramBuilder()
+          .addRuleInstance(PPLSimplifyDedupRule.DEDUP_SIMPLIFY_RULE)
+          .addRuleInstance(FilterMergeRule.Config.DEFAULT.toRule())
+          .build();
 
   public static RelNode optimize(RelNode plan, CalcitePlanContext context) {
     Util.discard(context);

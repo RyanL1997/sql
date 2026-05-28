@@ -353,4 +353,85 @@ public class CalcitePPLDedupTest extends CalcitePPLAbstractTest {
             + "            LogicalTableScan(table=[[scott, EMP]])\n";
     verifyLogical(root, expectedLogical);
   }
+
+  /**
+   * Regression test for issue #7: when a user {@code where} sits below {@code dedup}, the HEP
+   * program in {@code CalciteToolsHelper} must still produce a {@link
+   * org.opensearch.sql.calcite.plan.rel.LogicalDedup}. Before the fix, {@code FilterMergeRule}
+   * fired ahead of {@code PPLSimplifyDedupRule} and merged the user predicate into the
+   * bucket-non-null filter; the simplify rule's bottom operand then rejected the merged condition
+   * (it only accepts pure {@code IS NOT NULL}/AND-of-{@code IS NOT NULL}), no {@code LogicalDedup}
+   * was produced, and dedup pushdown to the OpenSearch storage engine was silently disabled. The
+   * fix is to enforce ordering: simplify-dedup runs to fixpoint first, then filter merging.
+   */
+  /**
+   * Regression test for issue #7: when a user {@code where} sits below {@code dedup}, the HEP
+   * program in {@code CalciteToolsHelper} must still produce a {@link
+   * org.opensearch.sql.calcite.plan.rel.LogicalDedup}. Before the fix, both rules were registered
+   * via {@code addRuleCollection} so {@code FilterMergeRule} could fire ahead of {@code
+   * PPLSimplifyDedupRule}, merge the user predicate into the bucket-non-null filter, and silently
+   * disable dedup pushdown to the OpenSearch storage engine. The fix is to register the two rules
+   * with separate {@code addRuleInstance} calls in the order: simplify-dedup first, then
+   * filter-merge.
+   */
+  @Test
+  public void testWhereThenDedupProducesLogicalDedup() {
+    // Use a where predicate on a DIFFERENT column from the dedup column. With the same column,
+    // Calcite's RexSimplify can fold AND(IS_NOT_NULL(x), >(x, c)) down to >(x, c), masking the
+    // bug. The issue's reproducer (where on @timestamp, dedup on namespace) hits this exact
+    // shape.
+    String ppl = "source=EMP | where SAL > 1000 | dedup 1 DEPTNO | fields DEPTNO";
+    RelNode optimized = getRelNodeAfterCalciteHep(ppl);
+    String optimizedPlan = optimized.explain();
+    org.junit.Assert.assertTrue(
+        "where + dedup must produce a LogicalDedup so OpenSearch DedupPushdownRule can match;"
+            + " actual plan was:\n"
+            + optimizedPlan,
+        optimizedPlan.contains("LogicalDedup"));
+    // The window-form leftover would indicate the simplify rule did not fire — assert it is gone.
+    org.junit.Assert.assertFalse(
+        "ROW_NUMBER window must be consumed by PPLSimplifyDedupRule when where + dedup are"
+            + " combined; actual plan was:\n"
+            + optimizedPlan,
+        optimizedPlan.contains("ROW_NUMBER"));
+  }
+
+  /**
+   * Adversarial regression test: simulates the pathological order described in issue #7 by forcing
+   * FilterMergeRule to run to fixpoint BEFORE PPLSimplifyDedupRule. This documents the failure mode
+   * the fix in {@code CalciteToolsHelper} prevents — once the bucket-non-null filter has been
+   * merged with the user {@code WHERE}, {@code mayBeFilterFromBucketNonNull} can never accept the
+   * combined condition, so {@code PPLSimplifyDedupRule} is permanently unable to produce a {@code
+   * LogicalDedup}. The production fix enforces order at the program level (sequential {@code
+   * addRuleInstance} calls), making this hazard unreachable.
+   */
+  @Test
+  public void testFilterMergeBeforeSimplifyDedupBreaksPattern() {
+    String ppl = "source=EMP | where SAL > 1000 | dedup 1 DEPTNO | fields DEPTNO";
+    // getRelNode already runs FilterMergeRule on the raw plan, simulating the pathological
+    // schedule where FilterMergeRule fires before PPLSimplifyDedupRule.
+    RelNode mergedFirst = getRelNode(ppl);
+    org.apache.calcite.plan.hep.HepProgram simplifyOnly =
+        new org.apache.calcite.plan.hep.HepProgramBuilder()
+            .addRuleInstance(
+                org.opensearch.sql.calcite.plan.rule.PPLSimplifyDedupRule.DEDUP_SIMPLIFY_RULE)
+            .build();
+    org.apache.calcite.plan.hep.HepPlanner planner =
+        new org.apache.calcite.plan.hep.HepPlanner(simplifyOnly);
+    planner.setRoot(mergedFirst);
+    RelNode result = planner.findBestExp();
+    String plan = result.explain();
+    org.junit.Assert.assertFalse(
+        "If FilterMergeRule runs before PPLSimplifyDedupRule, the simplify rule must NOT recover"
+            + " — the merged AND(IS_NOT_NULL, user_predicate) filter fails the bucket-non-null"
+            + " predicate. This documents why the production HEP program enforces ordering via"
+            + " separate addRuleInstance calls (PPLSimplifyDedupRule first, then FilterMergeRule)."
+            + " Actual plan was:\n"
+            + plan,
+        plan.contains("LogicalDedup"));
+    org.junit.Assert.assertTrue(
+        "Plan should still contain ROW_NUMBER window form when simplify fails. Actual plan was:\n"
+            + plan,
+        plan.contains("ROW_NUMBER"));
+  }
 }
