@@ -45,6 +45,7 @@ import org.opensearch.sql.ast.statement.Query;
 import org.opensearch.sql.calcite.CalcitePlanContext;
 import org.opensearch.sql.calcite.CalciteRelNodeVisitor;
 import org.opensearch.sql.calcite.SysLimit;
+import org.opensearch.sql.calcite.utils.CalciteToolsHelper;
 import org.opensearch.sql.common.setting.Settings;
 import org.opensearch.sql.datasource.DataSourceService;
 import org.opensearch.sql.exception.ExpressionEvaluationException;
@@ -108,6 +109,20 @@ public class CalcitePPLAbstractTest {
     root = mergeAdjacentFilters(root);
     System.out.println(root.explain());
     return root;
+  }
+
+  /**
+   * Get the root RelNode of the given PPL query after running the production HEP program from
+   * {@code CalciteToolsHelper}. Use this in regression tests that exercise rules registered in the
+   * production HEP program (e.g. {@code PPLSimplifyDedupRule}) — those rules need to see the raw
+   * planner output, not the post-FilterMerge form returned by {@link #getRelNode(String)}.
+   */
+  public RelNode getRelNodeAfterCalciteHep(String ppl) {
+    CalcitePlanContext context = createBuilderContext();
+    Query query = (Query) plan(pplParser, ppl);
+    planTransformer.analyze(query.getPlan(), context);
+    RelNode root = context.relBuilder.build();
+    return CalciteToolsHelper.optimize(root, context);
   }
 
   private RelNode mergeAdjacentFilters(RelNode relNode) {
