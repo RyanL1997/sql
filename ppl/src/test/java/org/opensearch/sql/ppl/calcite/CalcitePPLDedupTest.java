@@ -5,9 +5,17 @@
 
 package org.opensearch.sql.ppl.calcite;
 
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+import org.apache.calcite.plan.hep.HepPlanner;
+import org.apache.calcite.plan.hep.HepProgram;
+import org.apache.calcite.plan.hep.HepProgramBuilder;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.test.CalciteAssert;
 import org.junit.Test;
+import org.opensearch.sql.calcite.plan.rel.LogicalDedup;
+import org.opensearch.sql.calcite.plan.rule.PPLSimplifyDedupRule;
 
 public class CalcitePPLDedupTest extends CalcitePPLAbstractTest {
 
@@ -356,15 +364,14 @@ public class CalcitePPLDedupTest extends CalcitePPLAbstractTest {
 
   /**
    * Regression test for issue #7: when a user {@code where} sits below {@code dedup}, the HEP
-   * program in {@code CalciteToolsHelper} must still produce a {@link
-   * org.opensearch.sql.calcite.plan.rel.LogicalDedup}. Before the fix, both rules were registered
-   * via {@code addRuleCollection}, so {@code FilterMergeRule} could fire ahead of {@code
-   * PPLSimplifyDedupRule} and merge the user predicate into the bucket-non-null filter; the
-   * simplify rule's bottom operand then rejected the merged condition (it only accepts pure {@code
-   * IS NOT NULL}/AND-of-{@code IS NOT NULL}), no {@code LogicalDedup} was produced, and dedup
-   * pushdown to the OpenSearch storage engine was silently disabled. The fix is to register the two
-   * rules with separate {@code addRuleInstance} calls in the order simplify-dedup first (to
-   * fixpoint), then filter-merge.
+   * program in {@code CalciteToolsHelper} must still produce a {@link LogicalDedup}. Before the
+   * fix, both rules were registered via {@code addRuleCollection}, so {@code FilterMergeRule} could
+   * fire ahead of {@code PPLSimplifyDedupRule} and merge the user predicate into the
+   * bucket-non-null filter; the simplify rule's bottom operand then rejected the merged condition
+   * (it only accepts pure {@code IS NOT NULL}/AND-of-{@code IS NOT NULL}), no {@code LogicalDedup}
+   * was produced, and dedup pushdown to the OpenSearch storage engine was silently disabled. The
+   * fix is to register the two rules with separate {@code addRuleInstance} calls in the order
+   * simplify-dedup first (to fixpoint), then filter-merge.
    */
   @Test
   public void testWhereThenDedupProducesLogicalDedup() {
@@ -375,13 +382,13 @@ public class CalcitePPLDedupTest extends CalcitePPLAbstractTest {
     String ppl = "source=EMP | where SAL > 1000 | dedup 1 DEPTNO | fields DEPTNO";
     RelNode optimized = getRelNodeAfterCalciteHep(ppl);
     String optimizedPlan = optimized.explain();
-    org.junit.Assert.assertTrue(
+    assertTrue(
         "where + dedup must produce a LogicalDedup so OpenSearch DedupPushdownRule can match;"
             + " actual plan was:\n"
             + optimizedPlan,
         optimizedPlan.contains("LogicalDedup"));
     // The window-form leftover would indicate the simplify rule did not fire — assert it is gone.
-    org.junit.Assert.assertFalse(
+    assertFalse(
         "ROW_NUMBER window must be consumed by PPLSimplifyDedupRule when where + dedup are"
             + " combined; actual plan was:\n"
             + optimizedPlan,
@@ -403,17 +410,13 @@ public class CalcitePPLDedupTest extends CalcitePPLAbstractTest {
     // getRelNode already runs FilterMergeRule on the raw plan, simulating the pathological
     // schedule where FilterMergeRule fires before PPLSimplifyDedupRule.
     RelNode mergedFirst = getRelNode(ppl);
-    org.apache.calcite.plan.hep.HepProgram simplifyOnly =
-        new org.apache.calcite.plan.hep.HepProgramBuilder()
-            .addRuleInstance(
-                org.opensearch.sql.calcite.plan.rule.PPLSimplifyDedupRule.DEDUP_SIMPLIFY_RULE)
-            .build();
-    org.apache.calcite.plan.hep.HepPlanner planner =
-        new org.apache.calcite.plan.hep.HepPlanner(simplifyOnly);
+    HepProgram simplifyOnly =
+        new HepProgramBuilder().addRuleInstance(PPLSimplifyDedupRule.DEDUP_SIMPLIFY_RULE).build();
+    HepPlanner planner = new HepPlanner(simplifyOnly);
     planner.setRoot(mergedFirst);
     RelNode result = planner.findBestExp();
     String plan = result.explain();
-    org.junit.Assert.assertFalse(
+    assertFalse(
         "If FilterMergeRule runs before PPLSimplifyDedupRule, the simplify rule must NOT recover"
             + " — the merged AND(IS_NOT_NULL, user_predicate) filter fails the bucket-non-null"
             + " predicate. This documents why the production HEP program enforces ordering via"
@@ -421,7 +424,7 @@ public class CalcitePPLDedupTest extends CalcitePPLAbstractTest {
             + " Actual plan was:\n"
             + plan,
         plan.contains("LogicalDedup"));
-    org.junit.Assert.assertTrue(
+    assertTrue(
         "Plan should still contain ROW_NUMBER window form when simplify fails. Actual plan was:\n"
             + plan,
         plan.contains("ROW_NUMBER"));
