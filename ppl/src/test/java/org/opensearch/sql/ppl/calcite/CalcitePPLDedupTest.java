@@ -357,22 +357,14 @@ public class CalcitePPLDedupTest extends CalcitePPLAbstractTest {
   /**
    * Regression test for issue #7: when a user {@code where} sits below {@code dedup}, the HEP
    * program in {@code CalciteToolsHelper} must still produce a {@link
-   * org.opensearch.sql.calcite.plan.rel.LogicalDedup}. Before the fix, {@code FilterMergeRule}
-   * fired ahead of {@code PPLSimplifyDedupRule} and merged the user predicate into the
-   * bucket-non-null filter; the simplify rule's bottom operand then rejected the merged condition
-   * (it only accepts pure {@code IS NOT NULL}/AND-of-{@code IS NOT NULL}), no {@code LogicalDedup}
-   * was produced, and dedup pushdown to the OpenSearch storage engine was silently disabled. The
-   * fix is to enforce ordering: simplify-dedup runs to fixpoint first, then filter merging.
-   */
-  /**
-   * Regression test for issue #7: when a user {@code where} sits below {@code dedup}, the HEP
-   * program in {@code CalciteToolsHelper} must still produce a {@link
    * org.opensearch.sql.calcite.plan.rel.LogicalDedup}. Before the fix, both rules were registered
-   * via {@code addRuleCollection} so {@code FilterMergeRule} could fire ahead of {@code
-   * PPLSimplifyDedupRule}, merge the user predicate into the bucket-non-null filter, and silently
-   * disable dedup pushdown to the OpenSearch storage engine. The fix is to register the two rules
-   * with separate {@code addRuleInstance} calls in the order: simplify-dedup first, then
-   * filter-merge.
+   * via {@code addRuleCollection}, so {@code FilterMergeRule} could fire ahead of {@code
+   * PPLSimplifyDedupRule} and merge the user predicate into the bucket-non-null filter; the
+   * simplify rule's bottom operand then rejected the merged condition (it only accepts pure {@code
+   * IS NOT NULL}/AND-of-{@code IS NOT NULL}), no {@code LogicalDedup} was produced, and dedup
+   * pushdown to the OpenSearch storage engine was silently disabled. The fix is to register the two
+   * rules with separate {@code addRuleInstance} calls in the order simplify-dedup first (to
+   * fixpoint), then filter-merge.
    */
   @Test
   public void testWhereThenDedupProducesLogicalDedup() {
