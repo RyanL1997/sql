@@ -378,6 +378,11 @@ public abstract class AbstractCalciteIndexScan extends TableScan implements Alia
             // Keyword field is optimized for sorting in OpenSearch
             ExprType fieldType = osIndex.getFieldTypes().get(fieldName);
             String field = OpenSearchTextType.toKeywordSubField(fieldName, fieldType);
+            if (field == null) {
+              // A text field with no keyword subfield cannot be sorted natively; decline cleanly
+              // (mirrors the dedup pushdown path) rather than throwing IllegalArgumentException.
+              return null;
+            }
             sortBuilder = SortBuilders.fieldSort(field).missing(missing);
           }
           builders.add(sortBuilder.order(order));
@@ -430,8 +435,17 @@ public abstract class AbstractCalciteIndexScan extends TableScan implements Alia
                 case LAST -> "_last";
                 default -> null;
               };
+          // Sort on the keyword subfield for text fields, mirroring pushDownSort; a text field with
+          // no keyword subfield cannot be sorted natively, so decline the whole sort-expr pushdown.
+          String fieldName = digest.getFieldName();
+          String field =
+              OpenSearchTextType.toKeywordSubField(
+                  fieldName, osIndex.getFieldTypes().get(fieldName));
+          if (field == null) {
+            return null;
+          }
           sortBuilderSuppliers.add(
-              () -> SortBuilders.fieldSort(digest.getFieldName()).order(order).missing(missing));
+              () -> SortBuilders.fieldSort(field).order(order).missing(missing));
           continue;
         }
         RexNode sortExpr = digest.getExpression();
