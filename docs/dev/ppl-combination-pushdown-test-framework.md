@@ -8,6 +8,15 @@
 
 ---
 
+> **Implementation status (POC, 2026-06-25):** a production-shaped proof of concept exists on branch
+> `poc/ppl-combination-pushdown-tests`, all green. Built: `PushdownShapeOracle`,
+> `DifferentialComparator` (+ order-sensitive variant), `CombinationModel`, `PipelineGenerator`
+> (2–3 command pipelines, 100 over the bank profile), and the `ppl` `CommandCoverageGateTest`. Both
+> oracles run on a live cluster; the parser is validated on 367 real goldens and the command→token
+> map on 90 benchmark queries; all 100 generated pipelines are verified pushdown-invariant. The
+> framework also surfaced a real bug fixed on `fix/sort-pushdown-text-keyword-guard`. See the RFC:
+> [`rfc-ppl-combination-pushdown-testing.md`](./rfc-ppl-combination-pushdown-testing.md).
+
 ## 0. Project tenets (what every review must ask)
 
 These are the durable principles. Every change to the framework — and every PR that touches
