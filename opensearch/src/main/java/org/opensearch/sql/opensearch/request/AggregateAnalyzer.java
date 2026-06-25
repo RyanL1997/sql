@@ -157,7 +157,17 @@ public class AggregateAnalyzer {
     <T> T build(RexNode node, Function<String, T> fieldBuilder, Function<Script, T> scriptBuilder) {
       if (node == null) return fieldBuilder.apply(METADATA_FIELD);
       else if (node instanceof RexInputRef ref) {
-        return fieldBuilder.apply(inferNamedField(node).getReferenceForTermQuery());
+        String reference = inferNamedField(node).getReferenceForTermQuery();
+        if (reference == null) {
+          // A text field with no keyword subfield cannot be a native terms-aggregation source;
+          // decline the aggregate pushdown cleanly (mirrors the dedup/sort keyword-subfield guard)
+          // instead of building a source on field(null), which fails with an opaque error.
+          throw new IllegalStateException(
+              "Cannot push down aggregation: field '"
+                  + rowType.getFieldNames().get(ref.getIndex())
+                  + "' is a text field with no keyword subfield");
+        }
+        return fieldBuilder.apply(reference);
       } else if (node instanceof RexCall || node instanceof RexLiteral) {
         return scriptBuilder.apply(inferScript(node).getScript());
       }
