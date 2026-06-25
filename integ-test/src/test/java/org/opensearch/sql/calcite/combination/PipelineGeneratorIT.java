@@ -5,16 +5,17 @@
 
 package org.opensearch.sql.calcite.combination;
 
-import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.Test;
 
 /**
  * Cluster-free validation that {@link PipelineGenerator} emits only <b>reasonable</b> pipelines:
- * well-formed, two commands, and — crucially — never referencing a field a prior command dropped.
+ * well-formed, 2..3 commands, never referencing a field a prior command dropped, and never
+ * repeating a command adjacently.
  */
 public class PipelineGeneratorIT {
 
@@ -22,18 +23,23 @@ public class PipelineGeneratorIT {
       PipelineGenerator.generate("bank", CombinationModel.BANK);
 
   @Test
-  public void generatesWellFormedTwoCommandPipelines() {
+  public void generatesWellFormedTwoOrThreeCommandPipelines() {
     assertFalse("generator produced no pipelines", PIPELINES.isEmpty());
     assertTrue(
         "expected a non-trivial number of pipelines, got " + PIPELINES.size(),
         PIPELINES.size() >= 8);
     for (String pipeline : PIPELINES) {
       assertTrue(pipeline, pipeline.startsWith("source=bank | "));
-      assertEquals(
-          "a two-command pipeline has exactly two pipes: " + pipeline,
-          2,
-          pipeline.chars().filter(c -> c == '|').count());
+      int commands = commandKeywords(pipeline).size();
+      assertTrue("a pipeline has 2..3 commands: " + pipeline, commands == 2 || commands == 3);
     }
+  }
+
+  @Test
+  public void includesThreeCommandPipelines() {
+    assertTrue(
+        "expected at least one three-command pipeline:\n" + PIPELINES,
+        PIPELINES.stream().anyMatch(p -> commandKeywords(p).size() == 3));
   }
 
   @Test
@@ -49,9 +55,24 @@ public class PipelineGeneratorIT {
   }
 
   @Test
-  public void doesNotEmitRedundantAdjacentDuplicates() {
-    assertFalse(
-        "no redundant A | A adjacency:\n" + PIPELINES,
-        PIPELINES.stream().anyMatch(p -> p.matches("source=bank \\| (\\w+) .*\\| \\1 .*")));
+  public void neverRepeatsACommandAdjacently() {
+    for (String pipeline : PIPELINES) {
+      List<String> keywords = commandKeywords(pipeline);
+      for (int i = 1; i < keywords.size(); i++) {
+        assertFalse(
+            "adjacent duplicate command in: " + pipeline,
+            keywords.get(i).equals(keywords.get(i - 1)));
+      }
+    }
+  }
+
+  /** The leading keyword of each piped command segment (excluding the leading {@code source=}). */
+  private static List<String> commandKeywords(String pipeline) {
+    String[] segments = pipeline.split("\\|");
+    List<String> keywords = new ArrayList<>();
+    for (int i = 1; i < segments.length; i++) {
+      keywords.add(segments[i].trim().split("\\s+")[0]);
+    }
+    return keywords;
   }
 }

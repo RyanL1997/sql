@@ -74,6 +74,33 @@ public class DifferentialComparatorIT {
             rows(row(1.0))));
   }
 
+  @Test
+  public void orderSensitiveAcceptsIdenticalOrder() {
+    assertEqual(
+        DifferentialComparator.compareInOrder(
+            GROUPED,
+            GROUPED,
+            rows(row("VA", 5L), row("WA", 3L)),
+            rows(row("VA", 5L), row("WA", 3L))));
+  }
+
+  @Test
+  public void orderSensitiveDetectsReordering() {
+    // The multiset compare tolerates this reordering; the order-sensitive compare must NOT.
+    assertEqual(
+        DifferentialComparator.compare(
+            GROUPED,
+            GROUPED,
+            rows(row("VA", 5L), row("WA", 3L)),
+            rows(row("WA", 3L), row("VA", 5L))));
+    assertDifferent(
+        DifferentialComparator.compareInOrder(
+            GROUPED,
+            GROUPED,
+            rows(row("VA", 5L), row("WA", 3L)),
+            rows(row("WA", 3L), row("VA", 5L))));
+  }
+
   private static void assertEqual(Result r) {
     assertTrue(r.reason(), r.equal());
   }

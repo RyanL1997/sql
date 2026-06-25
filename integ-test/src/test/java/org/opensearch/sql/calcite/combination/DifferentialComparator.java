@@ -64,6 +64,29 @@ public final class DifferentialComparator {
     return new Result(true, "equal (within ULP, order-insensitive)");
   }
 
+  /**
+   * Order-sensitive comparison for pipelines that end in a total-order sort: rows must match
+   * position-by-position (with per-cell ULP tolerance). Unlike {@link #compare}, this catches a
+   * wrong <i>ordering</i>, not just a wrong row set — use it only when the query's sort fully
+   * determines the order (no ties), otherwise legitimate tie reordering causes false positives.
+   */
+  public static Result compareInOrder(
+      Schema on, Schema off, List<List<Object>> rowsOn, List<List<Object>> rowsOff) {
+    if (!on.names().equals(off.names()) || !on.types().equals(off.types())) {
+      return new Result(false, "schema drift: " + on + " vs " + off);
+    }
+    if (rowsOn.size() != rowsOff.size()) {
+      return new Result(false, "row count differs: " + rowsOn.size() + " vs " + rowsOff.size());
+    }
+    for (int i = 0; i < rowsOn.size(); i++) {
+      if (!rowsMatch(rowsOn.get(i), rowsOff.get(i))) {
+        return new Result(
+            false, "row " + i + " differs: " + rowsOn.get(i) + " vs " + rowsOff.get(i));
+      }
+    }
+    return new Result(true, "equal in order (within ULP)");
+  }
+
   static boolean rowsMatch(List<Object> a, List<Object> b) {
     if (a.size() != b.size()) {
       return false;

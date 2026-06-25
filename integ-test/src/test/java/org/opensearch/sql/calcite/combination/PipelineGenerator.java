@@ -5,28 +5,34 @@
 
 package org.opensearch.sql.calcite.combination;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import org.opensearch.sql.calcite.combination.CombinationModel.FieldType;
 
 /**
  * Generates <b>reasonable</b> multi-command PPL pipelines — not a cartesian product. Each candidate
  * command is applied to the currently-available schema and only emitted if its referenced fields
  * still exist (and have a compatible type), so a pipeline never references a field that a prior
- * {@code stats}/{@code fields} dropped. The command set is restricted to ones whose <i>row set</i>
- * is deterministic ({@code where}, {@code stats}, {@code eval}, {@code fields}, {@code sort}), so
- * the differential oracle can compare results order-insensitively without false positives from
- * unstable {@code head}/{@code dedup}.
+ * {@code stats}/{@code fields} dropped, and no two <i>adjacent</i> commands repeat. The command set
+ * is restricted to ones whose <i>row set</i> is deterministic ({@code where}, {@code stats}, {@code
+ * eval}, {@code fields}, {@code sort}), so the differential oracle can compare results
+ * order-insensitively without false positives from unstable {@code head}/{@code dedup}.
  *
- * <p>This is the validity model of the design doc in miniature: a left-to-right walk threading the
- * available-field set through each command's schema transform.
+ * <p>This is the validity model of the design doc in miniature: a depth-bounded walk threading the
+ * available-field set through each command's schema transform. {@link #generate(String, Map)}
+ * produces pipelines of 2..{@value #DEFAULT_MAX_COMMANDS} commands.
  */
 public final class PipelineGenerator {
 
   private PipelineGenerator() {}
+
+  public static final int DEFAULT_MAX_COMMANDS = 3;
 
   /** A rendered segment and the schema it leaves available to the next command. */
   public record Segment(String text, Map<String, FieldType> available) {}
@@ -36,6 +42,8 @@ public final class PipelineGenerator {
   private interface Command {
     Optional<Segment> apply(Map<String, FieldType> available);
   }
+
+  private record NamedSegment(String command, Segment segment) {}
 
   // Grouping fields preferred low-cardinality first; raw text is never groupable/sortable natively.
   private static final FieldType[] GROUPABLE_PREFERENCE = {
@@ -100,32 +108,47 @@ public final class PipelineGenerator {
         available -> firstGroupable(available).map(f -> new Segment("sort " + f, available)));
   }
 
-  /** Generate the valid two-command pipelines over an index profile. */
+  /**
+   * Generate valid pipelines of 2..{@value #DEFAULT_MAX_COMMANDS} commands over an index profile.
+   */
   public static List<String> generate(String index, Map<String, FieldType> schema) {
+    return generate(index, schema, DEFAULT_MAX_COMMANDS);
+  }
+
+  /** Generate valid pipelines of 2..{@code maxCommands} commands over an index profile. */
+  public static List<String> generate(
+      String index, Map<String, FieldType> schema, int maxCommands) {
     List<String> pipelines = new ArrayList<>();
-    for (Map.Entry<String, Command> first : COMMANDS.entrySet()) {
-      Optional<Segment> firstSegment = first.getValue().apply(schema);
-      if (firstSegment.isEmpty()) {
+    extend(new ArrayDeque<>(), schema, maxCommands, index, pipelines);
+    return pipelines.stream().distinct().toList();
+  }
+
+  private static void extend(
+      Deque<NamedSegment> chain,
+      Map<String, FieldType> available,
+      int remaining,
+      String index,
+      List<String> out) {
+    if (chain.size() >= 2) {
+      String body = chain.stream().map(s -> s.segment().text()).collect(Collectors.joining(" | "));
+      out.add("source=" + index + " | " + body);
+    }
+    if (remaining == 0) {
+      return;
+    }
+    String last = chain.isEmpty() ? null : chain.peekLast().command();
+    for (Map.Entry<String, Command> entry : COMMANDS.entrySet()) {
+      if (entry.getKey().equals(last)) {
+        continue; // no redundant adjacent A | A
+      }
+      Optional<Segment> segment = entry.getValue().apply(available);
+      if (segment.isEmpty()) {
         continue;
       }
-      for (Map.Entry<String, Command> second : COMMANDS.entrySet()) {
-        if (second.getKey().equals(first.getKey())) {
-          continue; // no redundant A | A adjacency
-        }
-        Optional<Segment> secondSegment = second.getValue().apply(firstSegment.get().available());
-        if (secondSegment.isEmpty()) {
-          continue;
-        }
-        pipelines.add(
-            "source="
-                + index
-                + " | "
-                + firstSegment.get().text()
-                + " | "
-                + secondSegment.get().text());
-      }
+      chain.addLast(new NamedSegment(entry.getKey(), segment.get()));
+      extend(chain, segment.get().available(), remaining - 1, index, out);
+      chain.removeLast();
     }
-    return pipelines;
   }
 
   private static Optional<String> firstOfType(Map<String, FieldType> schema, FieldType type) {
