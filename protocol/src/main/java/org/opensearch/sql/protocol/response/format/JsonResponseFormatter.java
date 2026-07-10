@@ -24,6 +24,8 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public abstract class JsonResponseFormatter<R> implements ResponseFormatter<R> {
 
+  public static final String CONTENT_TYPE = "application/json; charset=UTF-8";
+
   /**
    * JSON format styles: pretty format or compact format without indent and space.
    */
@@ -35,6 +37,10 @@ public abstract class JsonResponseFormatter<R> implements ResponseFormatter<R> {
    * JSON format style.
    */
   private final Style style;
+
+  public String contentType() {
+    return CONTENT_TYPE;
+  }
 
   @Override
   public String format(R response) {

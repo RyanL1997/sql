@@ -167,14 +167,15 @@ public class RestSQLQueryAction extends BaseRestHandler {
       @Override
       public void onResponse(QueryResponse response) {
         sendResponse(channel, OK,
-            formatter.format(new QueryResult(response.getSchema(), response.getResults())));
+            formatter.format(new QueryResult(response.getSchema(), response.getResults())),
+            formatter.contentType());
       }
 
       @Override
       public void onFailure(Exception e) {
         LOG.error("Error happened during query handling", e);
         logAndPublishMetrics(e);
-        sendResponse(channel, INTERNAL_SERVER_ERROR, formatter.format(e));
+        sendResponse(channel, INTERNAL_SERVER_ERROR, formatter.format(e), formatter.contentType());
       }
     };
   }
@@ -188,8 +189,12 @@ public class RestSQLQueryAction extends BaseRestHandler {
   }
 
   private void sendResponse(RestChannel channel, RestStatus status, String content) {
-    channel.sendResponse(new BytesRestResponse(
-        status, "application/json; charset=UTF-8", content));
+    sendResponse(channel, status, content, "application/json; charset=UTF-8");
+  }
+
+  private void sendResponse(RestChannel channel, RestStatus status, String content,
+                            String contentType) {
+    channel.sendResponse(new BytesRestResponse(status, contentType, content));
   }
 
   private static void logAndPublishMetrics(Exception e) {
