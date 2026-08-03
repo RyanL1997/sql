@@ -180,6 +180,20 @@ public class OpenSearchSettings extends Settings {
           Setting.Property.NodeScope,
           Setting.Property.Dynamic);
 
+  /**
+   * Enables approximate push down of {@code LIKE} over an analyzed {@code text} field that has no
+   * {@code keyword} sub-field. The pushed wildcard query is only a super-set of the real predicate,
+   * so the exact {@code LIKE} is always retained as a residual filter. Off by default because the
+   * super-set guarantee assumes a token-preserving analyzer (standard/simple/whitespace); analyzers
+   * that rewrite terms (stemming, synonyms, asciifolding, ngram) can make it drop matches.
+   */
+  public static final Setting<?> CALCITE_PUSHDOWN_LIKE_ON_TEXT_ENABLED_SETTING =
+      Setting.boolSetting(
+          Key.CALCITE_PUSHDOWN_LIKE_ON_TEXT_ENABLED.getKeyValue(),
+          false,
+          Setting.Property.NodeScope,
+          Setting.Property.Dynamic);
+
   public static final Setting<?> CALCITE_SUPPORT_ALL_JOIN_TYPES_SETTING =
       Setting.boolSetting(
           Key.CALCITE_SUPPORT_ALL_JOIN_TYPES.getKeyValue(),
@@ -473,6 +487,12 @@ public class OpenSearchSettings extends Settings {
     register(
         settingBuilder,
         clusterSettings,
+        Key.CALCITE_PUSHDOWN_LIKE_ON_TEXT_ENABLED,
+        CALCITE_PUSHDOWN_LIKE_ON_TEXT_ENABLED_SETTING,
+        new Updater(Key.CALCITE_PUSHDOWN_LIKE_ON_TEXT_ENABLED));
+    register(
+        settingBuilder,
+        clusterSettings,
         Key.CALCITE_SUPPORT_ALL_JOIN_TYPES,
         CALCITE_SUPPORT_ALL_JOIN_TYPES_SETTING,
         new Updater(Key.CALCITE_SUPPORT_ALL_JOIN_TYPES));
@@ -673,6 +693,7 @@ public class OpenSearchSettings extends Settings {
         .add(CALCITE_FALLBACK_ALLOWED_SETTING)
         .add(CALCITE_PUSHDOWN_ENABLED_SETTING)
         .add(CALCITE_PUSHDOWN_ROWCOUNT_ESTIMATION_FACTOR_SETTING)
+        .add(CALCITE_PUSHDOWN_LIKE_ON_TEXT_ENABLED_SETTING)
         .add(CALCITE_SUPPORT_ALL_JOIN_TYPES_SETTING)
         .add(DEFAULT_PATTERN_METHOD_SETTING)
         .add(DEFAULT_PATTERN_MODE_SETTING)

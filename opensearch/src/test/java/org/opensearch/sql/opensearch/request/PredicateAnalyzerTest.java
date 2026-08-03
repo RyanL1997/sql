@@ -17,6 +17,7 @@ import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.volcano.VolcanoPlanner;
@@ -1692,5 +1693,149 @@ public class PredicateAnalyzerTest {
     // Second must clause should be script query (unpushable LIKE)
     QueryBuilder secondMust = boolQuery.must().get(1);
     assertInstanceOf(ScriptQueryBuilder.class, secondMust);
+  }
+
+  /** Row type matching {@link #schema}, needed by the analyzeExpression overloads. */
+  private RelDataType rowType() {
+    return builder
+        .getTypeFactory()
+        .builder()
+        .kind(StructKind.FULLY_QUALIFIED)
+        .add("a", typeFactory.createSqlType(SqlTypeName.INTEGER))
+        .add("b", typeFactory.createSqlType(SqlTypeName.VARCHAR))
+        .add("c", typeFactory.createSqlType(SqlTypeName.VARCHAR))
+        .add("d", typeFactory.createUDT(ExprUDT.EXPR_TIMESTAMP))
+        .add("e", typeFactory.createSqlType(SqlTypeName.BOOLEAN))
+        .build();
+  }
+
+  /** LIKE over field "c", an analyzed text field with no keyword sub-field. */
+  private RexNode likeOnTextField(String pattern) {
+    RexInputRef field3 = builder.makeInputRef(typeFactory.createSqlType(SqlTypeName.VARCHAR), 2);
+    return builder.makeCall(
+        SqlStdOperatorTable.LIKE, field3, builder.makeLiteral(pattern), builder.makeLiteral("\\"));
+  }
+
+  private QueryExpression analyzeWithApproximation(RexNode node, Set<String> alreadyApproximated)
+      throws ExpressionNotAnalyzableException {
+    // ScriptQueryExpression, the fallback when approximation does not apply, needs a fixed clock.
+    Hook.CURRENT_TIME.addThread((Consumer<Holder<Long>>) h -> h.set(0L));
+    return PredicateAnalyzer.analyzeExpression(
+        node, schema, fieldTypes, rowType(), cluster, true, alreadyApproximated);
+  }
+
+  @Test
+  void approximateLikeOnText_isOffUnlessEnabled() throws ExpressionNotAnalyzableException {
+    Hook.CURRENT_TIME.addThread((Consumer<Holder<Long>>) h -> h.set(0L));
+    QueryExpression result =
+        PredicateAnalyzer.analyzeExpression(
+            likeOnTextField("%wildcard%"), schema, fieldTypes, rowType(), cluster);
+
+    // Unchanged behaviour: no exact query is available, so it degrades to a script query.
+    assertInstanceOf(ScriptQueryBuilder.class, result.builder());
+    assertTrue(result.getUnAnalyzableNodes().isEmpty());
+  }
+
+  @Test
+  void approximateLikeOnText_pushesWildcardAndKeepsExactPredicate()
+      throws ExpressionNotAnalyzableException {
+    RexNode likeCall = likeOnTextField("%wildcard%");
+    QueryExpression result = analyzeWithApproximation(likeCall, Set.of());
+
+    // A wildcard super-set query is pushed ...
+    assertInstanceOf(WildcardQueryBuilder.class, result.builder());
+    WildcardQueryBuilder wildcard = (WildcardQueryBuilder) result.builder();
+    assertEquals("c", wildcard.fieldName());
+    assertEquals("*wildcard*", wildcard.value());
+    // ... always case-insensitively, because the indexed tokens are lower-cased by the analyzer
+    // while the exact LIKE may be case-sensitive. Narrowing here would drop real matches.
+    assertTrue(wildcard.caseInsensitive());
+
+    // ... and the exact predicate is still reported as un-analyzable, so the planner keeps it as a
+    // residual filter above the scan. It is never reported as analyzed.
+    assertTrue(result.isPartial());
+    assertEquals(List.of(likeCall), result.getUnAnalyzableNodes());
+    assertTrue(result.getAnalyzedNodes().isEmpty());
+    // and it is reported as approximated, so the planner records it and never re-pushes it
+    assertEquals(List.of(likeCall), result.getApproximatedNodes());
+  }
+
+  @Test
+  void approximateLikeOnText_anchoredPatterns() throws ExpressionNotAnalyzableException {
+    assertEquals(
+        "wildcard*",
+        ((WildcardQueryBuilder)
+                analyzeWithApproximation(likeOnTextField("wildcard%"), Set.of()).builder())
+            .value());
+    assertEquals(
+        "*wildcard",
+        ((WildcardQueryBuilder)
+                analyzeWithApproximation(likeOnTextField("%wildcard"), Set.of()).builder())
+            .value());
+  }
+
+  @Test
+  void approximateLikeOnText_rejectsPatternsThatCanStraddleTokenBoundary()
+      throws ExpressionNotAnalyzableException {
+    // A wildcard query is matched against one token at a time, so any of these could match the raw
+    // value while no single token matches the pattern. Falling back to a script keeps LIKE exact.
+    for (String pattern :
+        List.of(
+            "%test wildcard%", // literal spans a token boundary
+            "%foo%bar%", // interior % can span a token boundary
+            "%foo_bar%", // interior _ can match a token separator
+            "%foo.bar%", // '.' is a token separator for the standard analyzer
+            "%foo-bar%",
+            "%te\\%st%", // escaped wildcard, not worth special-casing for now
+            "%", // matches everything; a full term scan buys nothing
+            "%%")) {
+      QueryExpression result = analyzeWithApproximation(likeOnTextField(pattern), Set.of());
+      assertInstanceOf(
+          ScriptQueryBuilder.class, result.builder(), "should not approximate pattern " + pattern);
+      assertTrue(
+          result.getApproximatedNodes().isEmpty(), "should not approximate pattern " + pattern);
+    }
+  }
+
+  @Test
+  void approximateLikeOnText_refusesNegation() throws ExpressionNotAnalyzableException {
+    // mustNot(superSet) is a SUB-set of NOT LIKE, and the residual filter cannot bring back
+    // documents that were never fetched. Negation must therefore fall back to the exact script.
+    RexNode notLike = builder.makeCall(SqlStdOperatorTable.NOT, likeOnTextField("%wildcard%"));
+    QueryExpression result = analyzeWithApproximation(notLike, Set.of());
+
+    assertInstanceOf(ScriptQueryBuilder.class, result.builder());
+    assertTrue(result.getApproximatedNodes().isEmpty());
+  }
+
+  @Test
+  void approximateLikeOnText_isNotPushedTwice() throws ExpressionNotAnalyzableException {
+    // The residual filter is re-matched by the push down rule. Without this guard the same wildcard
+    // would be appended on every firing and the planner would never converge.
+    RexNode likeCall = likeOnTextField("%wildcard%");
+    QueryExpression result = analyzeWithApproximation(likeCall, Set.of(likeCall.toString()));
+
+    assertInstanceOf(ScriptQueryBuilder.class, result.builder());
+    assertTrue(result.getApproximatedNodes().isEmpty());
+  }
+
+  @Test
+  void approximateLikeOnText_combinesWithExactPredicates() throws ExpressionNotAnalyzableException {
+    RexNode likeCall = likeOnTextField("%wildcard%");
+    RexNode equalsCall = builder.makeCall(SqlStdOperatorTable.EQUALS, field1, numericLiteral);
+    RexNode andCall = builder.makeCall(SqlStdOperatorTable.AND, equalsCall, likeCall);
+
+    QueryExpression result = analyzeWithApproximation(andCall, Set.of());
+
+    BoolQueryBuilder boolQuery = assertInstanceOf(BoolQueryBuilder.class, result.builder());
+    assertEquals(2, boolQuery.must().size());
+    assertInstanceOf(TermQueryBuilder.class, boolQuery.must().get(0));
+    assertInstanceOf(WildcardQueryBuilder.class, boolQuery.must().get(1));
+
+    // The exact term predicate is dropped from the plan, the approximated LIKE is not.
+    assertTrue(result.isPartial());
+    assertEquals(List.of(equalsCall), result.getAnalyzedNodes());
+    assertEquals(List.of(likeCall), result.getUnAnalyzableNodes());
+    assertEquals(List.of(likeCall), result.getApproximatedNodes());
   }
 }

@@ -43,6 +43,7 @@ public abstract class Settings {
     CALCITE_PUSHDOWN_ENABLED("plugins.calcite.pushdown.enabled"),
     CALCITE_PUSHDOWN_ROWCOUNT_ESTIMATION_FACTOR(
         "plugins.calcite.pushdown.rowcount.estimation.factor"),
+    CALCITE_PUSHDOWN_LIKE_ON_TEXT_ENABLED("plugins.calcite.pushdown.like_on_text.enabled"),
     CALCITE_SUPPORT_ALL_JOIN_TYPES("plugins.calcite.all_join_types.allowed"),
 
     /** Query Settings. */

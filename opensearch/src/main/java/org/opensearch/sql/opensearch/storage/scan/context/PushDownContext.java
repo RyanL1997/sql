@@ -7,8 +7,10 @@ package org.opensearch.sql.opensearch.storage.scan.context;
 
 import java.util.AbstractCollection;
 import java.util.ArrayDeque;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 import javax.annotation.Nullable;
 import lombok.Getter;
 import lombok.Setter;
@@ -42,6 +44,14 @@ public class PushDownContext extends AbstractCollection<PushDownOperation> {
   private boolean isRareTopPushed = false;
   private boolean isScriptPushed = false;
 
+  /**
+   * Digests of filter conditions that were pushed down only approximately, i.e. as a super-set
+   * query whose exact predicate is still applied by a residual filter above the scan. Such a
+   * condition must not be pushed a second time: the residual filter is itself a {@code Filter} over
+   * this scan, so the push down rule matches it again and would otherwise loop forever.
+   */
+  private Set<String> approximatedFilters = new HashSet<>();
+
   public PushDownContext(OpenSearchIndex osIndex) {
     this.osIndex = osIndex;
   }
@@ -53,6 +63,7 @@ public class PushDownContext extends AbstractCollection<PushDownOperation> {
       newContext.add(operation);
     }
     newContext.aggSpec = aggSpec;
+    newContext.approximatedFilters = new HashSet<>(approximatedFilters);
     return newContext;
   }
 
@@ -69,6 +80,7 @@ public class PushDownContext extends AbstractCollection<PushDownOperation> {
       }
     }
     newContext.aggSpec = aggSpec == null ? null : aggSpec.withoutBucketSort();
+    newContext.approximatedFilters = new HashSet<>(approximatedFilters);
     return newContext;
   }
 
@@ -114,6 +126,7 @@ public class PushDownContext extends AbstractCollection<PushDownOperation> {
       }
       newContext.add(operation);
     }
+    newContext.approximatedFilters = new HashSet<>(approximatedFilters);
     return newContext;
   }
 

@@ -216,6 +216,40 @@ public class PredicateAnalyzer {
         new Visitor(schema, fieldTypes, rowType, cluster));
   }
 
+  /**
+   * Same as {@link #analyzeExpression(RexNode, List, Map, RelDataType, RelOptCluster)} but allows
+   * approximate push down of LIKE over analyzed text fields.
+   *
+   * @param approximateLikeOnTextEnabled whether approximate push down may be used
+   * @param alreadyApproximated digests of RexNodes already pushed approximately, which must not be
+   *     approximated again; what this call approximates is reported by {@link
+   *     QueryExpression#getApproximatedNodes()}
+   */
+  public static QueryExpression analyzeExpression(
+      RexNode expression,
+      List<String> schema,
+      Map<String, ExprType> fieldTypes,
+      RelDataType rowType,
+      RelOptCluster cluster,
+      boolean approximateLikeOnTextEnabled,
+      Set<String> alreadyApproximated)
+      throws ExpressionNotAnalyzableException {
+    requireNonNull(expression, "expression");
+    return analyzeExpression(
+        expression,
+        schema,
+        fieldTypes,
+        rowType,
+        cluster,
+        new Visitor(
+            schema,
+            fieldTypes,
+            rowType,
+            cluster,
+            approximateLikeOnTextEnabled,
+            alreadyApproximated));
+  }
+
   /** For test only, passing a customer Visitor */
   public static QueryExpression analyzeExpression(
       RexNode expression,
@@ -257,16 +291,41 @@ public class PredicateAnalyzer {
     RelDataType rowType;
     RelOptCluster cluster;
 
+    /** Whether {@link #approximateLikeOnText} is allowed to kick in. */
+    private final boolean approximateLikeOnTextEnabled;
+
+    /**
+     * Digests of RexNodes that have already been pushed down approximately by an earlier firing.
+     * They are refused a second approximate push down, otherwise the residual filter left above the
+     * scan would be re-analyzed and re-pushed on every firing and the planner would never converge.
+     * What this call approximates is reported back through {@link
+     * QueryExpression#getApproximatedNodes()} rather than by mutating this set, so an abandoned
+     * branch cannot leave a stale entry behind.
+     */
+    private final Set<String> alreadyApproximated;
+
     Visitor(
         List<String> schema,
         Map<String, ExprType> fieldTypes,
         RelDataType rowType,
         RelOptCluster cluster) {
+      this(schema, fieldTypes, rowType, cluster, false, Set.of());
+    }
+
+    Visitor(
+        List<String> schema,
+        Map<String, ExprType> fieldTypes,
+        RelDataType rowType,
+        RelOptCluster cluster,
+        boolean approximateLikeOnTextEnabled,
+        Set<String> alreadyApproximated) {
       super(true);
       this.schema = schema;
       this.fieldTypes = fieldTypes;
       this.rowType = rowType;
       this.cluster = cluster;
+      this.approximateLikeOnTextEnabled = approximateLikeOnTextEnabled;
+      this.alreadyApproximated = alreadyApproximated;
     }
 
     @Override
@@ -779,7 +838,103 @@ public class PredicateAnalyzer {
       final Expression b = call.getOperands().get(1).accept(this);
       final SwapResult pair = swap(a, b);
       final boolean caseSensitive = ((SqlLikeOperator) call.getOperator()).isCaseSensitive();
-      return QueryExpression.create(pair.getKey()).like(pair.getValue(), caseSensitive);
+      try {
+        return QueryExpression.create(pair.getKey()).like(pair.getValue(), caseSensitive);
+      } catch (PredicateAnalyzerException e) {
+        QueryExpression approximate = approximateLikeOnText(call, pair);
+        if (approximate != null) {
+          return approximate;
+        }
+        throw e;
+      }
+    }
+
+    /**
+     * Approximate push down of {@code LIKE} over an analyzed {@code text} field that has no {@code
+     * keyword} sub-field. Such a field cannot be matched exactly by any single DSL query, so today
+     * the predicate is not pushed down at all and every candidate document is pulled back and
+     * filtered in memory.
+     *
+     * <p>Instead we push a {@code wildcard} query which is a <em>super-set</em> of the real
+     * predicate and keep the exact {@code LIKE} as a residual filter above the scan (see {@link
+     * ApproximateQueryExpression}). A {@code wildcard} query is a term-level query, so it is
+     * matched against the indexed tokens rather than against the raw {@code _source} value. That
+     * makes the super-set property hold only when
+     *
+     * <ul>
+     *   <li>the pattern cannot straddle a token boundary — enforced by {@link
+     *       #luceneSupersetPattern} — and
+     *   <li>the analyzer preserves terms up to lower-casing, which we cannot verify from the
+     *       mapping and is why the whole feature sits behind a setting.
+     * </ul>
+     *
+     * @return the approximate expression, or null when this LIKE does not qualify
+     */
+    private QueryExpression approximateLikeOnText(RexCall call, SwapResult pair) {
+      if (!approximateLikeOnTextEnabled) {
+        return null;
+      }
+      if (!(pair.getKey() instanceof NamedFieldExpression field)
+          || !(pair.getValue() instanceof LiteralExpression literal)) {
+        return null;
+      }
+      // Only kick in for the case exact push down cannot handle: an analyzed text field without a
+      // keyword sub-field. Everything else keeps its existing, exact behaviour.
+      if (!field.isTextType() || field.getReferenceForTermQuery() != null) {
+        return null;
+      }
+      if (!Strings.isNullOrEmpty(field.getNestedPath())) {
+        return null;
+      }
+      if (alreadyApproximated.contains(call.toString())) {
+        // Already pushed approximately by an earlier firing; leave it to the residual filter only.
+        return null;
+      }
+      String pattern = luceneSupersetPattern(literal.stringValue());
+      if (pattern == null) {
+        return null;
+      }
+      // Always case-insensitive: the indexed tokens are typically lower-cased by the analyzer, so a
+      // case-sensitive wildcard would miss documents an exact case-sensitive LIKE does match. The
+      // residual filter restores the exact case semantics either way.
+      QueryBuilder builder = wildcardQuery(field.getReference(), pattern).caseInsensitive(true);
+      return new ApproximateQueryExpression(builder, call);
+    }
+
+    /**
+     * Translates a SQL LIKE pattern into a Lucene wildcard pattern that is guaranteed to match a
+     * super-set of it when evaluated per token, or returns null when no such guarantee holds.
+     *
+     * <p>A wildcard is matched against one indexed token at a time, so any wildcard in the interior
+     * of the pattern is unsafe: {@code '%foo%bar%'} matches the raw value {@code "foo x bar"} while
+     * none of its tokens matches {@code *foo*bar*}. Only leading and trailing {@code %} are
+     * accepted, and the literal core in between must consist of characters that no common analyzer
+     * treats as a token separator.
+     */
+    private static String luceneSupersetPattern(String sqlPattern) {
+      if (sqlPattern == null || sqlPattern.isEmpty()) {
+        return null;
+      }
+      boolean anchoredStart = !sqlPattern.startsWith("%");
+      boolean anchoredEnd = !sqlPattern.endsWith("%") || sqlPattern.endsWith("\\%");
+      int from = anchoredStart ? 0 : 1;
+      int to = sqlPattern.length() - (anchoredEnd ? 0 : 1);
+      if (from >= to) {
+        // Degenerate patterns like '%' or '%%' match everything; not worth a wildcard scan.
+        return null;
+      }
+      String core = sqlPattern.substring(from, to);
+      // The core must be a plain literal made of characters that stay inside a single token. This
+      // deliberately rejects escapes, interior wildcards, whitespace and punctuation.
+      for (int i = 0; i < core.length(); i++) {
+        char c = core.charAt(i);
+        boolean alphanumeric =
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        if (!alphanumeric) {
+          return null;
+        }
+      }
+      return (anchoredStart ? "" : "*") + core + (anchoredEnd ? "" : "*");
     }
 
     private static QueryExpression constructQueryExpressionForSearch(
@@ -1051,6 +1206,15 @@ public class PredicateAnalyzer {
 
     public abstract List<RexNode> getUnAnalyzableNodes();
 
+    /**
+     * Nodes that were pushed down only approximately, i.e. as a super-set query whose exact
+     * predicate is still applied above the scan. Always a subset of {@link
+     * #getUnAnalyzableNodes()}. See {@link ApproximateQueryExpression}.
+     */
+    public List<RexNode> getApproximatedNodes() {
+      return List.of();
+    }
+
     public boolean isPartial() {
       return false;
     }
@@ -1228,6 +1392,70 @@ public class PredicateAnalyzer {
     }
   }
 
+  /**
+   * A query that <em>is</em> pushed down but is only an over-approximation of the predicate it came
+   * from: the DSL it produces matches a super-set of the documents the predicate matches.
+   *
+   * <p>Existing {@link QueryExpression}s are either exact (their RexNode ends up in {@code
+   * analyzedNodes} and is dropped from the plan) or not pushed at all ({@link
+   * UnAnalyzableQueryExpression}, whose RexNode stays as a residual filter). This one is both: it
+   * contributes a {@link QueryBuilder} <em>and</em> reports its RexNode as un-analyzable, so the
+   * exact predicate is re-evaluated above the scan over the narrowed candidate set. Correctness
+   * therefore only depends on the pushed query being a super-set — never on it being exact.
+   *
+   * <p>Because a super-set becomes a sub-set once negated, {@link #not()} must refuse: {@code
+   * mustNot(superSet)} would drop documents the residual filter can no longer bring back.
+   */
+  static class ApproximateQueryExpression extends QueryExpression {
+
+    private final QueryBuilder builder;
+    private final RexNode residualRexNode;
+
+    ApproximateQueryExpression(QueryBuilder builder, RexNode residualRexNode) {
+      this.builder = requireNonNull(builder, "builder");
+      this.residualRexNode = requireNonNull(residualRexNode, "residualRexNode");
+    }
+
+    @Override
+    public QueryBuilder builder() {
+      return builder;
+    }
+
+    @Override
+    public boolean isPartial() {
+      return true;
+    }
+
+    @Override
+    public List<RexNode> getAnalyzedNodes() {
+      // Never exact, so it never lets the planner drop the original condition.
+      return List.of();
+    }
+
+    @Override
+    public List<RexNode> getUnAnalyzableNodes() {
+      return List.of(residualRexNode);
+    }
+
+    @Override
+    public List<RexNode> getApproximatedNodes() {
+      return List.of(residualRexNode);
+    }
+
+    @Override
+    public void updateAnalyzedNodes(RexNode rexNode) {
+      // No-op: an approximate expression has no exactly analyzed node. Callers guard on
+      // isPartial() before calling this, so reaching here would be a caller bug rather than a
+      // correctness issue.
+    }
+
+    @Override
+    QueryExpression not() {
+      throw new PredicateAnalyzerException(
+          "An approximate query expression cannot be negated: " + residualRexNode);
+    }
+  }
+
   /** Builds conjunctions / disjunctions based on existing expressions. */
   public static class CompoundQueryExpression extends QueryExpression {
 
@@ -1235,6 +1463,7 @@ public class PredicateAnalyzer {
     private final BoolQueryBuilder builder;
     @Getter private List<RexNode> analyzedNodes = new ArrayList<>();
     @Getter private final List<RexNode> unAnalyzableNodes = new ArrayList<>();
+    @Getter private final List<RexNode> approximatedNodes = new ArrayList<>();
 
     public static CompoundQueryExpression or(QueryExpression... expressions) {
       CompoundQueryExpression bqe = new CompoundQueryExpression(false);
@@ -1257,6 +1486,7 @@ public class PredicateAnalyzer {
       for (QueryExpression expression : expressions) {
         bqe.analyzedNodes.addAll(expression.getAnalyzedNodes());
         bqe.unAnalyzableNodes.addAll(expression.getUnAnalyzableNodes());
+        bqe.approximatedNodes.addAll(expression.getApproximatedNodes());
         if (!(expression instanceof UnAnalyzableQueryExpression)) {
           bqe.builder.must(expression.builder());
           bqe.accumulateScriptCount(expression.getScriptCount());

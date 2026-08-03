@@ -164,15 +164,35 @@ public class CalciteLogicalIndexScan extends AbstractCalciteIndexScan implements
       Map<String, ExprType> fieldTypes = this.osIndex.getAllFieldTypes();
       QueryExpression queryExpression =
           PredicateAnalyzer.analyzeExpression(
-              filter.getCondition(), schema, fieldTypes, rowType, getCluster());
+              filter.getCondition(),
+              schema,
+              fieldTypes,
+              rowType,
+              getCluster(),
+              (Boolean)
+                  osIndex
+                      .getSettings()
+                      .getSettingValue(Settings.Key.CALCITE_PUSHDOWN_LIKE_ON_TEXT_ENABLED),
+              pushDownContext.getApproximatedFilters());
+
+      List<RexNode> residualConditions = queryExpression.getUnAnalyzableNodes();
+      if (queryExpression.isPartial() && residualConditions.isEmpty()) {
+        // The expression only covers part of the condition but has nothing left to re-apply above
+        // the scan, so pushing it would silently drop the uncovered part. Give up instead.
+        return null;
+      }
+
       // TODO: handle the case where condition contains a score function
       CalciteLogicalIndexScan newScan = this.copy();
+      queryExpression.getApproximatedNodes().stream()
+          .map(RexNode::toString)
+          .forEach(newScan.pushDownContext.getApproximatedFilters()::add);
       newScan.pushDownContext.add(
           queryExpression.getScriptCount() > 0 ? PushDownType.SCRIPT : PushDownType.FILTER,
           new FilterDigest(
               queryExpression.getScriptCount(),
               queryExpression.isPartial()
-                  ? constructCondition(
+                  ? constructExactlyPushedCondition(
                       queryExpression.getAnalyzedNodes(), getCluster().getRexBuilder())
                   : filter.getCondition()),
           (OSRequestBuilderAction)
@@ -181,9 +201,7 @@ public class CalciteLogicalIndexScan extends AbstractCalciteIndexScan implements
       // If the query expression is partial, we need to replace the input of the filter with the
       // partial pushed scan and the filter condition with non-pushed-down conditions.
       if (queryExpression.isPartial()) {
-        // Only CompoundQueryExpression could be partial.
-        List<RexNode> conditions = queryExpression.getUnAnalyzableNodes();
-        RexNode newCondition = constructCondition(conditions, getCluster().getRexBuilder());
+        RexNode newCondition = constructCondition(residualConditions, getCluster().getRexBuilder());
         return filter.copy(filter.getTraitSet(), newScan, newCondition);
       }
       return newScan;
@@ -218,6 +236,17 @@ public class CalciteLogicalIndexScan extends AbstractCalciteIndexScan implements
     return conditions.size() > 1
         ? rexBuilder.makeCall(SqlStdOperatorTable.AND, conditions)
         : conditions.get(0);
+  }
+
+  /**
+   * Digest of the part of the condition that was pushed down <em>exactly</em>. It is empty when the
+   * whole condition was only approximated, in which case nothing has been removed from the plan.
+   */
+  private static RexNode constructExactlyPushedCondition(
+      List<RexNode> conditions, RexBuilder rexBuilder) {
+    return conditions.isEmpty()
+        ? rexBuilder.makeLiteral(true)
+        : constructCondition(conditions, rexBuilder);
   }
 
   public CalciteLogicalIndexScan pushDownCollapse(Project finalOutput, String fieldName) {
