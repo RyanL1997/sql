@@ -32,6 +32,14 @@ public class SQLToOperatorConverter extends MySqlASTVisitorAdapter {
 
   @Getter private PhysicalOperator<BindingTuple> physicalOperator;
 
+  /**
+   * The {@link AggregationQueryAction} backing the scroll operator. Exposed so the enclosing {@link
+   * org.opensearch.sql.legacy.executor.adapter.QueryPlanQueryAction} can propagate the {@link
+   * org.opensearch.sql.legacy.request.SqlRequest} down to it, which is what makes the request-level
+   * "filter" field apply to aggregation queries.
+   */
+  @Getter private AggregationQueryAction scrollQueryAction;
+
   public SQLToOperatorConverter(Client client, ColumnTypeProvider columnTypeProvider) {
     this.client = client;
     this.aggregationParser = new SQLAggregationParser(columnTypeProvider);
@@ -66,6 +74,7 @@ public class SQLToOperatorConverter extends MySqlASTVisitorAdapter {
     query.getSelectList().clear();
     query.getSelectList().addAll(aggregationParser.selectItemList());
     Select select = new SqlParser().parseSelect(query);
-    return new PhysicalScroll(new AggregationQueryAction(client, select));
+    scrollQueryAction = new AggregationQueryAction(client, select);
+    return new PhysicalScroll(scrollQueryAction);
   }
 }

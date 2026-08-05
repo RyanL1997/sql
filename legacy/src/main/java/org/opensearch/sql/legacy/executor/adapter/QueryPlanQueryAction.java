@@ -11,6 +11,7 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 import org.opensearch.sql.legacy.query.QueryAction;
 import org.opensearch.sql.legacy.query.SqlElasticRequestBuilder;
+import org.opensearch.sql.legacy.request.SqlRequest;
 
 /**
  * The definition of QueryPlan of QueryAction which works as the adapter to the current QueryAction
@@ -27,6 +28,20 @@ public class QueryPlanQueryAction extends QueryAction {
   @Override
   public SqlElasticRequestBuilder explain() {
     return requestBuilder;
+  }
+
+  /**
+   * Propagate the request down to the {@link QueryAction} that actually builds the OpenSearch
+   * request, otherwise request body fields such as "filter" are silently dropped for aggregation
+   * queries.
+   */
+  @Override
+  public void setSqlRequest(SqlRequest sqlRequest) {
+    super.setSqlRequest(sqlRequest);
+    QueryAction scrollQueryAction = requestBuilder.scrollQueryAction();
+    if (scrollQueryAction != null) {
+      scrollQueryAction.setSqlRequest(sqlRequest);
+    }
   }
 
   @Override

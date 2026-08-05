@@ -11,6 +11,7 @@ import org.opensearch.action.ActionRequest;
 import org.opensearch.action.ActionRequestBuilder;
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.sql.legacy.expression.domain.BindingTuple;
+import org.opensearch.sql.legacy.query.QueryAction;
 import org.opensearch.sql.legacy.query.SqlElasticRequestBuilder;
 import org.opensearch.sql.legacy.query.planner.core.BindingTupleQueryPlanner;
 import org.opensearch.sql.legacy.query.planner.core.ColumnNode;
@@ -26,6 +27,11 @@ public class QueryPlanRequestBuilder implements SqlElasticRequestBuilder {
 
   public List<ColumnNode> outputColumns() {
     return queryPlanner.getColumnNodes();
+  }
+
+  /** The inner {@link QueryAction} that actually builds the OpenSearch request. */
+  public QueryAction scrollQueryAction() {
+    return queryPlanner.getScrollQueryAction();
   }
 
   @Override

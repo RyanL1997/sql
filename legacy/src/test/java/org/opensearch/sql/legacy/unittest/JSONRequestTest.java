@@ -402,6 +402,45 @@ public class JSONRequestTest {
     assertThat(removeSpaces(result), equalTo(removeSpaces(expectedOutput)));
   }
 
+  /**
+   * Aggregation queries are routed to the query planner rather than to AggregationQueryAction
+   * directly, so the request-level "filter" used to be dropped from the generated DSL. See issue
+   * #5649.
+   */
+  @Test
+  public void queryFilterWithAggregation() {
+    String result =
+        explain(
+            String.format(
+                "{\"query\":\""
+                    + "SELECT COUNT(*) "
+                    + "FROM %s "
+                    + "WHERE age > 25\","
+                    + "\"filter\":{\"range\":{\"balance\":{\"lte\":30000}}}}",
+                TestsConstants.TEST_INDEX_ACCOUNT));
+
+    assertThat(result, containsString("\"age\""));
+    assertThat(result, containsString("\"balance\""));
+  }
+
+  /** Same as above but with a GROUP BY, which takes the same query planner path. */
+  @Test
+  public void queryFilterWithGroupBy() {
+    String result =
+        explain(
+            String.format(
+                "{\"query\":\""
+                    + "SELECT gender, COUNT(*) "
+                    + "FROM %s "
+                    + "WHERE age > 25 "
+                    + "GROUP BY gender\","
+                    + "\"filter\":{\"range\":{\"balance\":{\"lte\":30000}}}}",
+                TestsConstants.TEST_INDEX_ACCOUNT));
+
+    assertThat(result, containsString("\"age\""));
+    assertThat(result, containsString("\"balance\""));
+  }
+
   private String removeSpaces(String s) {
     return s.replaceAll("\\s+", "");
   }

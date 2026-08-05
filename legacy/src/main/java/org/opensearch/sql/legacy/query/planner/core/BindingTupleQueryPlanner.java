@@ -11,6 +11,7 @@ import java.util.List;
 import lombok.Getter;
 import org.opensearch.sql.legacy.domain.ColumnTypeProvider;
 import org.opensearch.sql.legacy.expression.domain.BindingTuple;
+import org.opensearch.sql.legacy.query.QueryAction;
 import org.opensearch.sql.legacy.query.planner.converter.SQLToOperatorConverter;
 import org.opensearch.sql.legacy.query.planner.physical.PhysicalOperator;
 import org.opensearch.sql.legacy.query.planner.physical.node.scroll.PhysicalScroll;
@@ -20,6 +21,7 @@ import org.opensearch.transport.client.Client;
 public class BindingTupleQueryPlanner {
   private final PhysicalOperator<BindingTuple> physicalOperator;
   @Getter private final List<ColumnNode> columnNodes;
+  @Getter private final QueryAction scrollQueryAction;
 
   public BindingTupleQueryPlanner(
       Client client, SQLQueryExpr sqlExpr, ColumnTypeProvider columnTypeProvider) {
@@ -27,6 +29,7 @@ public class BindingTupleQueryPlanner {
     sqlExpr.accept(converter);
     this.physicalOperator = converter.getPhysicalOperator();
     this.columnNodes = converter.getColumnNodes();
+    this.scrollQueryAction = converter.getScrollQueryAction();
   }
 
   /**
