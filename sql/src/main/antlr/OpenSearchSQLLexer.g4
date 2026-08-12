@@ -283,6 +283,7 @@ RIGHT_BRACE:                        '}';
 
 
 // Window function names
+BRAIN:                              'BRAIN';
 DENSE_RANK:                         'DENSE_RANK';
 RANK:                               'RANK';
 ROW_NUMBER:                         'ROW_NUMBER';

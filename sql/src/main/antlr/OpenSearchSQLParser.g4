@@ -183,7 +183,7 @@ windowFunctionClause
    ;
 
 windowFunction
-   : functionName = (ROW_NUMBER | RANK | DENSE_RANK) LR_BRACKET functionArgs? RR_BRACKET    # scalarWindowFunction
+   : functionName = (ROW_NUMBER | RANK | DENSE_RANK | BRAIN) LR_BRACKET functionArgs? RR_BRACKET # scalarWindowFunction
    | aggregateFunction                                                                      # aggregateWindowFunction
    ;
 

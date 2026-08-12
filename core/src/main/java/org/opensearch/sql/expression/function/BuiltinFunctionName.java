@@ -428,6 +428,7 @@ public enum BuiltinFunctionName {
           .put("dc", BuiltinFunctionName.DISTINCT_COUNT_APPROX)
           .put("distinct_count", BuiltinFunctionName.DISTINCT_COUNT_APPROX)
           .put("pattern", BuiltinFunctionName.INTERNAL_PATTERN)
+          .put("brain", BuiltinFunctionName.INTERNAL_PATTERN)
           .put("row_number", BuiltinFunctionName.ROW_NUMBER)
           .build();
 
