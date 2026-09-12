@@ -16,7 +16,9 @@ import java.util.List;
 import java.util.stream.Stream;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -148,5 +150,97 @@ class CoercionUtilsTest {
     public List<List<RelDataType>> getParameterTypes() {
       return signatures;
     }
+  }
+
+  private static RexNode variantRef() {
+    return REX_BUILDER.makeInputRef(
+        OpenSearchTypeFactory.TYPE_FACTORY.createSqlType(SqlTypeName.VARIANT, true), 0);
+  }
+
+  // A VARIANT argument (a flat_object leaf) can be cast to any scalar; among the numeric types a
+  // signature accepts, the widest is chosen so that 12.5 is not truncated to 12.
+  @Test
+  void castArgumentsCastsVariantToWidestAcceptedNumeric() {
+    PPLTypeChecker typeChecker =
+        new StubTypeChecker(List.of(List.of(sqlType(INTEGER)), List.of(sqlType(DOUBLE))));
+
+    List<RexNode> result =
+        CoercionUtils.castArguments(REX_BUILDER, typeChecker, List.of(variantRef()));
+
+    assertNotNull(result);
+    assertEquals(SqlTypeName.DOUBLE, result.getFirst().getType().getSqlTypeName());
+  }
+
+  @Test
+  void castArgumentsCastsVariantToStringWhenThatIsWhatIsAccepted() {
+    PPLTypeChecker typeChecker = new StubTypeChecker(List.of(List.of(sqlType(STRING))));
+
+    List<RexNode> result =
+        CoercionUtils.castArguments(REX_BUILDER, typeChecker, List.of(variantRef()));
+
+    assertNotNull(result);
+    assertEquals(SqlTypeName.VARCHAR, result.getFirst().getType().getSqlTypeName());
+  }
+
+  // The other arguments still have to fit the chosen signature.
+  @Test
+  void castArgumentsWithVariantReturnsNullWhenOtherArgumentsDoNotFit() {
+    PPLTypeChecker typeChecker =
+        new StubTypeChecker(List.of(List.of(sqlType(DOUBLE), sqlType(DOUBLE))));
+    List<RexNode> arguments =
+        List.of(
+            variantRef(),
+            REX_BUILDER.makeInputRef(
+                OpenSearchTypeFactory.TYPE_FACTORY.createSqlType(SqlTypeName.GEOMETRY), 1));
+
+    assertNull(CoercionUtils.castArguments(REX_BUILDER, typeChecker, arguments));
+  }
+
+  @Test
+  void hasVariantDetectsAVariantArgument() {
+    assertTrue(CoercionUtils.hasVariant(List.of(nullLiteral(INTEGER), variantRef())));
+    assertFalse(CoercionUtils.hasVariant(List.of(nullLiteral(INTEGER), nullLiteral(STRING))));
+  }
+
+  // A VARIANT passed where an array is expected is converted by VARIANT_ARRAY -- PPL's array
+  // functions are written for a list of plain values -- and typed as PPL's ARRAY (ARRAY<ANY>).
+  @Test
+  void castArgumentsConvertsVariantToAnArrayOfPlainValues() {
+    PPLTypeChecker typeChecker = new StubTypeChecker(List.of(List.of(sqlType(ExprCoreType.ARRAY))));
+
+    List<RexNode> result =
+        CoercionUtils.castArguments(REX_BUILDER, typeChecker, List.of(variantRef()));
+
+    assertNotNull(result);
+    RexNode first = result.getFirst();
+    assertEquals("VARIANT_ARRAY", ((RexCall) first).getOperator().getName());
+    assertEquals(SqlTypeName.ARRAY, first.getType().getSqlTypeName());
+    assertEquals(SqlTypeName.ANY, first.getType().getComponentType().getSqlTypeName());
+  }
+
+  // The typed form, for a lambda parameter or an expanded row: ARRAY<VARIANT>, each element the
+  // variant it is, because Calcite's runtime type information can describe VARIANT but not ANY.
+  @Test
+  void castVariantToArrayOfVariantsKeepsTheElementType() {
+    RexNode cast = CoercionUtils.castVariantToArrayOfVariants(REX_BUILDER, variantRef());
+
+    assertEquals(SqlKind.CAST, cast.getKind());
+    assertEquals(SqlTypeName.ARRAY, cast.getType().getSqlTypeName());
+    assertEquals(SqlTypeName.VARIANT, cast.getType().getComponentType().getSqlTypeName());
+  }
+
+  // A variant's cast never throws (Calcite returns null for a value not of the target type), so
+  // it is a plain CAST rather than the SAFE_CAST other coercions use. SAFE_CAST is generated as a
+  // try/catch in an inner class, which cannot capture a lambda parameter, so the plain CAST is
+  // what lets a lambda body such as `x -> x > 100` be compiled over a variant element.
+  @Test
+  void variantIsCastWithPlainCastNotSafeCast() {
+    PPLTypeChecker typeChecker = new StubTypeChecker(List.of(List.of(sqlType(DOUBLE))));
+
+    List<RexNode> result =
+        CoercionUtils.castArguments(REX_BUILDER, typeChecker, List.of(variantRef()));
+
+    assertNotNull(result);
+    assertEquals(SqlKind.CAST, result.getFirst().getKind());
   }
 }

@@ -28,6 +28,7 @@ import org.apache.calcite.rel.externalize.RelJsonWriter;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.runtime.Hook;
+import org.apache.calcite.runtime.variant.VariantValue;
 import org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlOperatorTable;
@@ -65,6 +66,7 @@ import org.opensearch.sql.expression.function.PPLFuncImpTable;
 import org.opensearch.sql.monitor.profile.MetricName;
 import org.opensearch.sql.monitor.profile.ProfileScope;
 import org.opensearch.sql.opensearch.client.OpenSearchClient;
+import org.opensearch.sql.opensearch.data.value.OpenSearchExprFlatObjectValue;
 import org.opensearch.sql.opensearch.data.value.OpenSearchExprGeoPointValue;
 import org.opensearch.sql.opensearch.executor.protector.ExecutionProtector;
 import org.opensearch.sql.opensearch.functions.DistinctCountApproxAggFunction;
@@ -395,6 +397,11 @@ public class OpenSearchExecutionEngine implements ExecutionEngine {
     if (value instanceof Point point) {
       return new OpenSearchExprGeoPointValue(point.getY(), point.getX());
     }
+    if (value instanceof VariantValue variant) {
+      // A VARIANT (a flat_object leaf) carries its own runtime type; hand back the value it wraps
+      // so the row is typed by what the document recorded.
+      return processValue(OpenSearchExprFlatObjectValue.unwrap(variant), null);
+    }
     if (value instanceof Map) {
       Map<String, Object> map = (Map<String, Object>) value;
       Map<String, Object> convertedMap = new HashMap<>();
@@ -458,14 +465,20 @@ public class OpenSearchExecutionEngine implements ExecutionEngine {
       // TODO: Correct this after fixing issue github.com/opensearch-project/sql/issues/3751
       //  The element type of struct and array is currently set to ANY.
       //  We set them using the runtime type as a workaround.
+      // A VARIANT column (a flat_object leaf) has no static type by design; it likewise takes
+      // the type of its runtime value.
       ExprType exprType;
-      if (fieldType.getSqlTypeName() == SqlTypeName.ANY) {
-        if (!values.isEmpty()) {
-          exprType = values.getFirst().tupleValue().get(columnName).type();
-        } else {
-          // Using UNDEFINED instead of UNKNOWN to avoid throwing exception
-          exprType = ExprCoreType.UNDEFINED;
-        }
+      if (fieldType.getSqlTypeName() == SqlTypeName.ANY
+          || fieldType.getSqlTypeName() == SqlTypeName.VARIANT) {
+        // The first non-null value decides; a leading null says nothing about the column.
+        // Using UNDEFINED instead of UNKNOWN to avoid throwing exception
+        exprType =
+            values.stream()
+                .map(row -> row.tupleValue().get(columnName))
+                .filter(v -> v != null && !v.isNull())
+                .map(ExprValue::type)
+                .findFirst()
+                .orElse(ExprCoreType.UNDEFINED);
       } else {
         exprType = OpenSearchTypeFactory.convertRelDataTypeToExprType(fieldType);
       }

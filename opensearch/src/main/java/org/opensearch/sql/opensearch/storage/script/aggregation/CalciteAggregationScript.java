@@ -16,6 +16,7 @@ import lombok.EqualsAndHashCode;
 import org.apache.calcite.DataContext;
 import org.apache.calcite.linq4j.function.Function1;
 import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.runtime.variant.VariantValue;
 import org.apache.lucene.index.LeafReaderContext;
 import org.opensearch.script.AggregationScript;
 import org.opensearch.search.lookup.SearchLookup;
@@ -24,6 +25,7 @@ import org.opensearch.sql.calcite.utils.OpenSearchTypeFactory;
 import org.opensearch.sql.data.model.ExprValueUtils;
 import org.opensearch.sql.data.type.ExprCoreType;
 import org.opensearch.sql.data.type.ExprType;
+import org.opensearch.sql.opensearch.data.value.OpenSearchExprFlatObjectValue;
 import org.opensearch.sql.opensearch.storage.script.core.CalciteScript;
 
 /** Calcite script executor that executes the generated code on each document for aggregation. */
@@ -57,6 +59,10 @@ class CalciteAggregationScript extends AggregationScript {
   public Object execute() {
     Object value =
         calciteScript.execute(this.getDoc(), this.sourceLookup, this.parametersToIndex)[0];
+    if (value instanceof VariantValue variant) {
+      // A flat_object leaf: the bucket key is the value it wraps, not the variant's rendering.
+      value = OpenSearchExprFlatObjectValue.unwrap(variant);
+    }
     ExprType exprType = OpenSearchTypeFactory.convertRelDataTypeToExprType(type);
     // See logic in {@link ExpressionAggregationScript::execute}
     return switch ((ExprCoreType) exprType) {

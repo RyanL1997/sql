@@ -2,8 +2,9 @@
 #        https://github.com/opensearch-project/sql/issues/3067
 # flat_object fields used to be dropped by OpenSearchDataType.parseMapping ("unknown type, skip
 # it"), so they were absent from the schema and any reference failed as "field not found".
-# The field is now a map keyed by dotted leaf path; every leaf value is a string, as the index
-# stores it. A nested object and a literal dotted key resolve to the same entry.
+# The field is now a map keyed by dotted leaf path; every leaf value is a VARIANT that keeps the
+# type it was written with in _source (12.5 stays a number, "4" stays text). A nested object and a
+# literal dotted key resolve to the same entry.
 #
 # Every pushed-down case is asserted twice, with pushdown on and off: the coordinator and the
 # data-node script read the field through the same flattening, so both paths must agree.
@@ -69,7 +70,7 @@ teardown:
   - match: {"datarows": [["attributes", "flat_object"], ["service", "string"]]}
 
 ---
-"flat_object is projected as a map of dotted leaf path to string":
+"flat_object is projected as a map of dotted leaf path to typed value":
   - skip:
       features: [headers]
   - do:
@@ -78,7 +79,7 @@ teardown:
         body:
           query: 'source=otel | where service = ''payments'' | fields attributes'
   - match: {"schema": [{"name": "attributes", "type": "struct"}]}
-  - match: {"datarows": [[{"duration_ms": "4", "http.response.status_code": "503"}]]}
+  - match: {"datarows": [[{"duration_ms": "4", "http.response.status_code": 503}]]}
 
 ---
 "both spellings of a path resolve to the same leaf":
@@ -89,8 +90,8 @@ teardown:
       ppl:
         body:
           query: 'source=otel | fields service, attributes.http.response.status_code'
-  - match: {"schema.1.type": "string"}
-  - match: {"datarows": [["checkout", "500"], ["payments", "503"], ["search", "200"], ["tags", null]]}
+  - match: {"schema.1.type": "int"}
+  - match: {"datarows": [["checkout", 500], ["payments", 503], ["search", 200], ["tags", null]]}
 
 ---
 "filter compares numerically across both spellings (pushdown on)":
@@ -157,7 +158,7 @@ teardown:
   - match: {"datarows": [["checkout"]]}
 
 ---
-"aggregate without a cast (pushdown on)":
+"aggregate without a cast counts only values recorded as numbers (pushdown on)":
   - skip:
       features: [headers]
   - do:
@@ -170,10 +171,10 @@ teardown:
       ppl:
         body:
           query: 'source=otel | stats avg(attributes.duration_ms)'
-  - match: {"datarows": [[8.25]]}
+  - match: {"datarows": [[12.5]]}
 
 ---
-"aggregate without a cast (pushdown off)":
+"aggregate without a cast counts only values recorded as numbers (pushdown off)":
   - skip:
       features: [headers]
   - do:
@@ -186,7 +187,7 @@ teardown:
       ppl:
         body:
           query: 'source=otel | stats avg(attributes.duration_ms)'
-  - match: {"datarows": [[8.25]]}
+  - match: {"datarows": [[12.5]]}
 
 ---
 "group by a leaf (pushdown on)":
@@ -202,7 +203,7 @@ teardown:
       ppl:
         body:
           query: 'source=otel | stats count() by attributes.duration_ms | sort attributes.duration_ms'
-  - match: {"datarows": [[1, null], [1, "12.5"], [1, "4"], [1, "n/a"]]}
+  - match: {"datarows": [[1, null], [1, 12.5], [1, "4"], [1, "n/a"]]}
 
 ---
 "group by a leaf (pushdown off)":
@@ -218,10 +219,10 @@ teardown:
       ppl:
         body:
           query: 'source=otel | stats count() by attributes.duration_ms | sort attributes.duration_ms'
-  - match: {"datarows": [[1, null], [1, "12.5"], [1, "4"], [1, "n/a"]]}
+  - match: {"datarows": [[1, null], [1, 12.5], [1, "4"], [1, "n/a"]]}
 
 ---
-"sort by a leaf is lexicographic, as for any string (pushdown on)":
+"sort by a leaf puts numbers first, then text (pushdown on)":
   - skip:
       features: [headers]
   - do:
@@ -234,10 +235,10 @@ teardown:
       ppl:
         body:
           query: 'source=otel | sort attributes.duration_ms | fields service, attributes.duration_ms'
-  - match: {"datarows": [["tags", null], ["checkout", "12.5"], ["payments", "4"], ["search", "n/a"]]}
+  - match: {"datarows": [["tags", null], ["checkout", 12.5], ["payments", "4"], ["search", "n/a"]]}
 
 ---
-"sort by a leaf is lexicographic, as for any string (pushdown off)":
+"sort by a leaf puts numbers first, then text (pushdown off)":
   - skip:
       features: [headers]
   - do:
@@ -250,31 +251,131 @@ teardown:
       ppl:
         body:
           query: 'source=otel | sort attributes.duration_ms | fields service, attributes.duration_ms'
-  - match: {"datarows": [["tags", null], ["checkout", "12.5"], ["payments", "4"], ["search", "n/a"]]}
+  - match: {"datarows": [["tags", null], ["checkout", 12.5], ["payments", "4"], ["search", "n/a"]]}
 
 ---
-"an array leaf becomes one string, the array's JSON text":
+"an array leaf stays an array, each element typed on its own":
   - skip:
       features: [headers]
   - do:
       headers: {Content-Type: 'application/json'}
       ppl:
         body:
-          query: 'source=otel | where service = ''tags'' | fields attributes.tags, attributes.mixed'
-  - match: {"schema": [{"name": "attributes.tags", "type": "string"}, {"name": "attributes.mixed", "type": "string"}]}
-  - match: {"datarows": [["[\"a\",\"b\"]", "[1,\"x\"]"]]}
+          query: 'source=otel | where service = ''tags'' | fields attributes'
+  - match: {"datarows": [[{"tags": ["a", "b"], "ports": [80, 443], "mixed": [1, "x"], "nested": [{"k": 1}, {"k": 2}]}]]}
 
 ---
-"mvexpand on an array leaf has nothing to expand, the leaf being one string":
+"an array leaf is projected as an array with typed elements":
   - skip:
       features: [headers]
   - do:
       headers: {Content-Type: 'application/json'}
       ppl:
         body:
-          query: 'source=otel | where service = ''tags'' | mvexpand attributes.tags | fields attributes.tags'
-  - match: {"schema": [{"name": "attributes.tags", "type": "string"}]}
-  - match: {"datarows": [["[\"a\",\"b\"]"]]}
+          query: 'source=otel | where service = ''tags'' | fields attributes.tags, attributes.ports, attributes.mixed, attributes.nested'
+  - match: {"schema": [{"name": "attributes.tags", "type": "array"}, {"name": "attributes.ports", "type": "array"}, {"name": "attributes.mixed", "type": "array"}, {"name": "attributes.nested", "type": "array"}]}
+  - match: {"datarows": [[["a", "b"], [80, 443], [1, "x"], [{"k": 1}, {"k": 2}]]]}
+
+---
+"array functions work on an array leaf":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''tags'' | eval n = array_length(attributes.tags), first = mvindex(attributes.mixed, 0), joined = mvjoin(attributes.tags, ''|'') | fields n, first, joined'
+  - match: {"schema": [{"name": "n", "type": "int"}, {"name": "first", "type": "int"}, {"name": "joined", "type": "string"}]}
+  - match: {"datarows": [[2, 1, "a|b"]]}
+
+---
+"lambda functions work on an array leaf, each element keeping its type":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''tags'' | eval big = filter(attributes.ports, x -> x > 100), plus = transform(attributes.ports, x -> x + 1), any_a = exists(attributes.tags, x -> x = ''a''), total = reduce(attributes.ports, 0, (acc, x) -> acc + x) | fields big, plus, any_a, total'
+  - match: {"datarows": [[[443], [81.0, 444.0], true, 523.0]]}
+
+---
+"mvappend takes an array leaf as its elements and a scalar leaf as one value":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''tags'' | eval r = mvappend(attributes.tags, ''c'', attributes.ports) | fields r'
+  - match: {"datarows": [[["a", "b", "c", 80, 443]]]}
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''checkout'' | eval r = mvappend(attributes.duration_ms, 1) | fields r'
+  - match: {"datarows": [[[12.5, 1]]]}
+
+---
+"mvexpand on an array leaf yields one row per element, typed":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''tags'' | mvexpand attributes.ports | where attributes.ports > 100 | fields service, attributes.ports'
+  - match: {"datarows": [["tags", 443]]}
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''tags'' | mvexpand attributes.tags | stats count() by attributes.tags | sort attributes.tags'
+  - match: {"datarows": [[1, "a"], [1, "b"]]}
+
+---
+"mvexpand on a scalar leaf keeps the row with its value":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''checkout'' | mvexpand attributes.duration_ms | fields attributes.duration_ms'
+  - match: {"datarows": [[12.5]]}
+
+---
+"an untyped function receives a leaf as its plain value":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | eval d = coalesce(attributes.duration_ms, ''none'') | fields service, d'
+  - match: {"datarows": [["checkout", 12.5], ["payments", "4"], ["search", "n/a"], ["tags", "none"]]}
+
+---
+"typeof on a leaf reports the type each record wrote":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | eval t = typeof(attributes.duration_ms) | fields service, t'
+  - match: {"datarows": [["checkout", "DOUBLE"], ["payments", "VARCHAR"], ["search", "VARCHAR"], ["tags", null]]}
+
+---
+"which producers send a value as text":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where typeof(attributes.duration_ms) = ''VARCHAR'' | fields service, attributes.duration_ms'
+  - match: {"datarows": [["payments", "4"], ["search", "n/a"]]}
 
 ---
 "text equality on a leaf is answered by the inverted index alone":
@@ -300,7 +401,9 @@ teardown:
       ppl:
         body:
           query: 'source=otel | where attributes.http.response.status_code = ''503'' | fields service'
-  - match: {"datarows": [["payments"]]}
+  # the index term "503" matches the record, and the script rejects it: 503 was written as a
+  # number, and a number does not equal the text '503'
+  - match: {"datarows": []}
 
 ---
 "existence and prefix on a leaf use the index the same way":
@@ -348,4 +451,6 @@ teardown:
       ppl:
         body:
           query: 'source=otel | where not attributes.duration_ms = ''n/a'' | fields service'
-  - match: {"datarows": [["checkout"], ["payments"]]}
+  # checkout wrote a number; compared with text it is null, and not(null) is null, so it is
+  # filtered out -- only the value written as text takes part
+  - match: {"datarows": [["payments"]]}

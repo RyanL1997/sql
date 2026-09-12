@@ -581,7 +581,7 @@ public class PPLFuncImpTable {
       List<RexNode> fields = new ArrayList<>();
       fields.add(field);
       fields.addAll(argList);
-      if (CoercionUtils.hasString(fields)) {
+      if (CoercionUtils.hasString(fields) || CoercionUtils.hasVariant(fields)) {
         coercionNodes = CoercionUtils.castArguments(rexBuilder, signature.typeChecker(), fields);
       }
       if (coercionNodes == null) {
@@ -643,6 +643,8 @@ public class PPLFuncImpTable {
     // Align integer operand widths when a comparison has a scalar subquery on one side; see
     // coerceNumericComparisonOperands for why this is needed for correct decorrelated join keys.
     args = coerceNumericComparisonOperands(builder, functionName, args);
+
+    args = unwrapVariantsForUntypedFunction(builder, functionName, implementList, args);
 
     List<RelDataType> argTypes = Arrays.stream(args).map(RexNode::getType).toList();
     try {
@@ -721,6 +723,33 @@ public class PPLFuncImpTable {
       builder.makeCast(
           TYPE_FACTORY.createTypeWithNullability(commonType, rightType.isNullable()), args[1])
     };
+  }
+
+  /**
+   * A function registered without a type checker takes its arguments untyped, as plain Java values:
+   * {@code mvappend}, {@code coalesce}, {@code array}, the {@code json_*} functions. A VARIANT
+   * argument -- a {@code flat_object} leaf -- is handed to such a function as the value it holds,
+   * an array as a list, an object as a map, a scalar as itself, rather than as one opaque object. A
+   * typed function is not affected: its VARIANT arguments are cast to the parameter type by {@link
+   * CoercionUtils}. {@code typeof} is the one function registered without a type checker that wants
+   * the variant itself, since the type is what it reports.
+   */
+  private static RexNode[] unwrapVariantsForUntypedFunction(
+      RexBuilder builder,
+      BuiltinFunctionName functionName,
+      List<Pair<CalciteFuncSignature, FunctionImp>> implementList,
+      RexNode... args) {
+    boolean untyped = implementList.stream().allMatch(impl -> impl.getKey().typeChecker() == null);
+    if (!untyped || functionName == TYPEOF || !CoercionUtils.hasVariant(Arrays.asList(args))) {
+      return args;
+    }
+    RexNode[] unwrapped = args.clone();
+    for (int i = 0; i < unwrapped.length; i++) {
+      if (unwrapped[i].getType().getSqlTypeName() == SqlTypeName.VARIANT) {
+        unwrapped[i] = builder.makeCall(PPLBuiltinOperators.VARIANT_VALUE, unwrapped[i]);
+      }
+    }
+    return unwrapped;
   }
 
   /** Whether {@code node} is, or transitively contains, a {@link RexSubQuery}. */
@@ -1525,7 +1554,11 @@ public class PPLFuncImpTable {
           TYPEOF,
           (FunctionImp1)
               (builder, arg) ->
-                  builder.makeLiteral(getLegacyTypeName(arg.getType(), QueryType.PPL)),
+                  // A VARIANT (a flat_object leaf) has no static type; its type is a property of
+                  // each value, so ask the value at runtime through Calcite's TYPEOF.
+                  arg.getType().getSqlTypeName() == SqlTypeName.VARIANT
+                      ? builder.makeCall(SqlStdOperatorTable.TYPEOF, arg)
+                      : builder.makeLiteral(getLegacyTypeName(arg.getType(), QueryType.PPL)),
           null);
       register(
           NULLIF,

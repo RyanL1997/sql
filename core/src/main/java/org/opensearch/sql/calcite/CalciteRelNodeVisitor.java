@@ -199,6 +199,7 @@ import org.opensearch.sql.exception.CalciteUnsupportedException;
 import org.opensearch.sql.exception.SemanticCheckException;
 import org.opensearch.sql.expression.HighlightExpression;
 import org.opensearch.sql.expression.function.BuiltinFunctionName;
+import org.opensearch.sql.expression.function.CoercionUtils;
 import org.opensearch.sql.expression.function.PPLBuiltinOperators;
 import org.opensearch.sql.expression.function.PPLFuncImpTable;
 import org.opensearch.sql.expression.parse.RegexCommonUtils;
@@ -4713,7 +4714,12 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
           .build();
     }
 
-    final RexNode fieldRex = rexVisitor.analyze(field, context);
+    RexNode fieldRex = rexVisitor.analyze(field, context);
+    if (fieldRex.getType().getSqlTypeName() == SqlTypeName.VARIANT) {
+      // A flat_object leaf: expand it as an array of variants, so each row keeps the element's
+      // own type. A leaf holding a single value expands to that one value.
+      fieldRex = CoercionUtils.castVariantToArrayOfVariants(context.rexBuilder, fieldRex);
+    }
 
     final RelDataType fieldType = fieldRex.getType();
     if (!(SqlTypeUtil.isArray(fieldType) || SqlTypeUtil.isMultiset(fieldType))) {

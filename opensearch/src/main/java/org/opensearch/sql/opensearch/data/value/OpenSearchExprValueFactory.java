@@ -256,7 +256,7 @@ public class OpenSearchExprValueFactory {
    * field is numeric while the conflict's merged type is text. Render it as its string form rather
    * than letting the {@code (String) value} cast fail and null the value out.
    */
-  static String stringOf(Content content) {
+  private static String stringOf(Content content) {
     try {
       return content.stringValue();
     } catch (RuntimeException e) {
@@ -266,7 +266,7 @@ public class OpenSearchExprValueFactory {
     }
   }
 
-  private ExprValue parseContent(Content content) {
+  static ExprValue parseContent(Content content) {
     if (content.isNumber()) {
       if (content.isInt()) {
         return new ExprIntegerValue(content.intValue());

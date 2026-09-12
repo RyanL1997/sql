@@ -5,27 +5,28 @@
 
 package org.opensearch.sql.opensearch.data.value;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import lombok.experimental.UtilityClass;
+import org.opensearch.sql.data.model.ExprCollectionValue;
 import org.opensearch.sql.data.model.ExprNullValue;
-import org.opensearch.sql.data.model.ExprStringValue;
 import org.opensearch.sql.data.model.ExprTupleValue;
 import org.opensearch.sql.data.model.ExprValue;
 import org.opensearch.sql.opensearch.data.utils.Content;
 import org.opensearch.sql.opensearch.data.utils.ObjectContent;
-import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.ObjectMapper;
 
 /**
  * Turns a flat_object subtree into the one shape the engine presents it as: a single-level map from
- * dotted leaf path to string value.
+ * dotted leaf path to a value that keeps the type it was written with.
  *
  * <p>A flat_object declares no sub-fields, so its shape is known only from the document, and two
  * producers may write the same logical path differently: {@code {"a.b": 1}} and {@code {"a": {"b":
  * 1}}}. OpenSearch indexes both as the one term {@code a.b=1}; flattening makes both spellings
- * resolve to the same entry, which is what a dotted path expression looks up. Every leaf becomes a
- * string, mirroring how the index stores it (a keyword term), so a flat_object behaves like the map
- * that {@code json_extract_all} produces. Arrays are kept as a single leaf.
+ * resolve to the same entry, which is what a dotted path expression looks up. Each leaf keeps its
+ * {@code _source} type -- {@code 12.5} is a number, {@code "4"} is text -- which the index has
+ * discarded but the document still records. Arrays are kept as a single leaf.
  *
  * <p>This is the only place that logic lives. The coordinator calls it when it builds a row from
  * {@code _source}, and a pushed-down script calls it on the data node when it reads the same field,
@@ -52,14 +53,14 @@ public class FlatObjectValues {
     if (content == null || content.isNull() || !content.isObject()) {
       return ExprNullValue.of();
     }
-    ExprTupleValue result = ExprTupleValue.empty();
-    flattenInto(content, "", result, 0);
-    return result;
+    LinkedHashMap<String, ExprValue> leaves = new LinkedHashMap<>();
+    flattenInto(content, "", leaves, 0);
+    return new OpenSearchExprFlatObjectValue(leaves);
   }
 
   /**
    * Flatten a flat_object value read from {@code _source} on a data node, in the form a script
-   * consumes: a {@code Map<String, Object>} whose values are strings.
+   * consumes: a {@code Map<String, Object>} whose values are VARIANTs.
    *
    * @param source the field's {@code _source} value, as returned by {@code
    *     SourceLookup#extractValue}; expected to be a map
@@ -72,7 +73,27 @@ public class FlatObjectValues {
     return flatten(new ObjectContent(source)).valueForCalcite();
   }
 
-  private static void flattenInto(Content content, String prefix, ExprTupleValue out, int depth) {
+  /**
+   * A leaf value, typed by the value itself exactly as an unmapped field is. An array stays an
+   * array with each element typed on its own; an object inside an array keeps its boundaries as a
+   * tuple, since flattening it into the parent would merge the array's elements together.
+   */
+  private static ExprValue leaf(Content value, int depth) {
+    if (value.isArray()) {
+      List<ExprValue> elements = new ArrayList<>();
+      value.array().forEachRemaining(element -> elements.add(leaf(element, depth)));
+      return new ExprCollectionValue(elements);
+    }
+    if (value.isObject() && depth < MAX_DEPTH) {
+      LinkedHashMap<String, ExprValue> entries = new LinkedHashMap<>();
+      flattenInto(value, "", entries, depth + 1);
+      return ExprTupleValue.fromExprValueMap(entries);
+    }
+    return OpenSearchExprValueFactory.parseContent(value);
+  }
+
+  private static void flattenInto(
+      Content content, String prefix, LinkedHashMap<String, ExprValue> out, int depth) {
     content
         .map()
         .forEachRemaining(
@@ -81,33 +102,9 @@ public class FlatObjectValues {
               Content value = entry.getValue();
               if (value.isObject() && depth < MAX_DEPTH) {
                 flattenInto(value, key, out, depth + 1);
-              } else if (value.isNull()) {
-                out.tupleValue().put(key, ExprNullValue.of());
               } else {
-                out.tupleValue().put(key, new ExprStringValue(textOf(value)));
+                out.put(key, leaf(value, depth));
               }
             });
-  }
-
-  private static final ObjectMapper JSON = new ObjectMapper();
-
-  /**
-   * The text form of a leaf, decided by its type rather than by trying a string cast and catching
-   * the failure -- a numeric leaf is the common case, and an exception per leaf per document is the
-   * dominant cost on the data node. Arrays and objects become compact JSON on both the coordinator
-   * (a Jackson node) and the data node (a plain map), so the two paths agree.
-   */
-  private static String textOf(Content value) {
-    if (value.isString()) {
-      return value.stringValue();
-    }
-    if (value.isNumber() || value.isBoolean()) {
-      return String.valueOf(value.objectValue());
-    }
-    Object raw = value.objectValue();
-    if (raw instanceof JsonNode node) {
-      return node.toString();
-    }
-    return JSON.writeValueAsString(raw);
   }
 }

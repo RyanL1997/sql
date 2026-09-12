@@ -414,6 +414,17 @@ public class CalciteLogicalIndexScan extends AbstractCalciteIndexScan implements
         }
         return null;
       }
+      if (aggregate.getRowType().getFieldList().stream()
+          .limit(aggregate.getGroupSet().cardinality())
+          .anyMatch(field -> field.getType().getSqlTypeName() == SqlTypeName.VARIANT)) {
+        // A terms aggregation keys every bucket with a single value type, but a VARIANT bucket (a
+        // flat_object leaf) holds a different type per document. Pushing it down would flatten
+        // the keys to text and disagree with the coordinator, which keeps them typed.
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Cannot pushdown the aggregate due to bucket of VARIANT type");
+        }
+        return null;
+      }
       // Try partial mode before analyze: since #5646 a text/keyword conflict pushes down as a slow
       // _source script instead of failing, so a post-failure fallback would never fire.
       if (allowPartialFallback) {

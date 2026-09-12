@@ -1022,13 +1022,14 @@ class OpenSearchExprValueFactoryTest {
     assertEquals(expectedValue, tupleValue);
   }
 
-  // flat_object: both spellings of a path collapse to one dotted key, every leaf is a string.
+  // flat_object: both spellings of a path collapse to one dotted key, and every leaf keeps the
+  // type it was written with.
 
   @Test
   public void constructFlatObject_bothSpellingsCollapseToDottedKey() {
     ExprValue dotted = tupleValue("{\"flatV\":{\"a.b\":1}}").get("flatV");
     ExprValue nested = tupleValue("{\"flatV\":{\"a\":{\"b\":1}}}").get("flatV");
-    ExprValue expected = ExprValueUtils.tupleValue(Map.of("a.b", stringValue("1")));
+    ExprValue expected = ExprValueUtils.tupleValue(Map.of("a.b", integerValue(1)));
     assertAll(
         () -> assertEquals(expected, dotted),
         () -> assertEquals(expected, nested),
@@ -1036,28 +1037,31 @@ class OpenSearchExprValueFactoryTest {
   }
 
   @Test
-  public void constructFlatObject_everyLeafIsAString() {
+  public void constructFlatObject_everyLeafKeepsItsType() {
     ExprValue value =
         tupleValue("{\"flatV\":{\"n\":12.5,\"s\":\"4\",\"b\":true,\"z\":null}}").get("flatV");
     assertAll(
-        () -> assertEquals(stringValue("12.5"), value.tupleValue().get("n")),
+        () -> assertEquals(doubleValue(12.5), value.tupleValue().get("n")),
         () -> assertEquals(stringValue("4"), value.tupleValue().get("s")),
-        () -> assertEquals(stringValue("true"), value.tupleValue().get("b")),
+        () -> assertEquals(booleanValue(true), value.tupleValue().get("b")),
         () -> assertEquals(nullValue(), value.tupleValue().get("z")));
   }
 
   @Test
-  public void constructFlatObject_arrayIsKeptAsOneLeaf() {
-    ExprValue value = tupleValue("{\"flatV\":{\"tags\":[\"a\",\"b\"]}}").get("flatV");
+  public void constructFlatObject_arrayStaysAnArrayOfTypedElements() {
+    ExprValue value = tupleValue("{\"flatV\":{\"tags\":[\"a\",1]}}").get("flatV");
     assertAll(
         () -> assertEquals(1, value.tupleValue().size()),
-        () -> assertEquals(STRING, value.tupleValue().get("tags").type()));
+        () ->
+            assertEquals(
+                new ExprCollectionValue(List.of(stringValue("a"), integerValue(1))),
+                value.tupleValue().get("tags")));
   }
 
   @Test
   public void constructFlatObject_fromObjectContent() {
     ExprValue value = constructFromObject("flatV", Map.of("a", Map.of("b", 503)));
-    assertEquals(ExprValueUtils.tupleValue(Map.of("a.b", stringValue("503"))), value);
+    assertEquals(ExprValueUtils.tupleValue(Map.of("a.b", integerValue(503))), value);
   }
 
   @Test

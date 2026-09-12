@@ -101,7 +101,7 @@ public class CalcitePPLMvExpandTest extends CalcitePPLAbstractTest {
                       factory.createMapType(
                           factory.createSqlType(SqlTypeName.VARCHAR),
                           factory.createTypeWithNullability(
-                              factory.createSqlType(SqlTypeName.VARCHAR), true)))
+                              factory.createSqlType(SqlTypeName.VARIANT), true)))
                   .build();
     }
   }
@@ -205,11 +205,21 @@ public class CalcitePPLMvExpandTest extends CalcitePPLAbstractTest {
   }
 
   @Test
-  public void testMvExpandLeafOfMapColumnIsResolved() {
-    // The leaf is not a field of the schema, but it is resolved through the map; a scalar leaf is
-    // returned unchanged like any scalar field.
+  public void testMvExpandLeafOfMapColumnIsExpandedAsAnArrayOfVariants() {
+    // The leaf is not a field of the schema, but it is resolved through the map. A flat_object
+    // leaf is a VARIANT: it is cast to ARRAY<VARIANT>, projected under its own name, and expanded
+    // like any array column; each expanded row keeps the element's own type.
     RelNode root = getRelNode("source=FLAT | mvexpand ATTRS.tags");
-    verifyLogical(root, "LogicalTableScan(table=[[scott, FLAT]])\n");
+    String expectedLogical =
+        "LogicalProject(DEPTNO=[$0], ATTRS=[$1], ATTRS.tags=[$3])\n"
+            + "  LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{2}])\n"
+            + "    LogicalProject(DEPTNO=[$0], ATTRS=[$1], ATTRS.tags=[CAST(ITEM($1,"
+            + " 'tags')):VARIANT ARRAY NOT NULL])\n"
+            + "      LogicalTableScan(table=[[scott, FLAT]])\n"
+            + "    Uncollect\n"
+            + "      LogicalProject(ATTRS.tags=[$cor0.ATTRS.tags])\n"
+            + "        LogicalValues(tuples=[[{ 0 }]])\n";
+    verifyLogical(root, expectedLogical);
   }
 
   @Test

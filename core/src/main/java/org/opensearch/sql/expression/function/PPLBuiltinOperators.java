@@ -88,6 +88,8 @@ import org.opensearch.sql.expression.function.udf.RmunitConvertFunction;
 import org.opensearch.sql.expression.function.udf.SpanFunction;
 import org.opensearch.sql.expression.function.udf.ToNumberFunction;
 import org.opensearch.sql.expression.function.udf.ToStringFunction;
+import org.opensearch.sql.expression.function.udf.VariantArrayFunction;
+import org.opensearch.sql.expression.function.udf.VariantValueFunction;
 import org.opensearch.sql.expression.function.udf.condition.EarliestFunction;
 import org.opensearch.sql.expression.function.udf.condition.EnhancedCoalesceFunction;
 import org.opensearch.sql.expression.function.udf.condition.LatestFunction;
@@ -154,6 +156,12 @@ public class PPLBuiltinOperators extends ReflectiveSqlOperatorTable {
   public static final SqlOperator CIDRMATCH = new CidrMatchFunction().toUDF("CIDRMATCH");
   public static final SqlOperator SCALAR_MAX = new ScalarMaxFunction().toUDF("SCALAR_MAX");
   public static final SqlOperator SCALAR_MIN = new ScalarMinFunction().toUDF("SCALAR_MIN");
+
+  /** The plain value of a VARIANT, for functions that take their arguments untyped. */
+  public static final SqlOperator VARIANT_VALUE = new VariantValueFunction().toUDF("VARIANT_VALUE");
+
+  /** A VARIANT as a PPL array of plain values, for functions that take an array. */
+  public static final SqlOperator VARIANT_ARRAY = new VariantArrayFunction().toUDF("VARIANT_ARRAY");
 
   public static final SqlOperator COSH =
       adaptMathFunctionToUDF(

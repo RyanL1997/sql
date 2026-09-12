@@ -681,6 +681,14 @@ public class CalciteRexNodeVisitor extends AbstractNodeVisitor<RexNode, CalciteP
     try {
       for (UnresolvedExpression arg : args) {
         if (arg instanceof LambdaFunction) {
+          if (!arguments.isEmpty()
+              && arguments.get(0).getType().getSqlTypeName() == SqlTypeName.VARIANT) {
+            // A flat_object leaf holding an array: make it an ARRAY<VARIANT> so the lambda's
+            // parameter is typed from its element type like any other array argument.
+            arguments.set(
+                0,
+                CoercionUtils.castVariantToArrayOfVariants(context.rexBuilder, arguments.get(0)));
+          }
           CalcitePlanContext lambdaContext =
               prepareLambdaContext(
                   context, (LambdaFunction) arg, arguments, node.getFuncName(), null);

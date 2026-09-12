@@ -42,15 +42,16 @@ class OpenSearchFlatObjectTypeTest {
         () -> assertTrue(type.getProperties().isEmpty()));
   }
 
-  // The field is presented to the planner as a map from dotted leaf path to string value.
+  // The field is presented to the planner as a map from dotted leaf path to a VARIANT value, so
+  // each leaf keeps the type it was written with.
   @Test
-  void mapsToCalciteMapOfVarcharToVarchar() {
+  void mapsToCalciteMapOfVarcharToVariant() {
     RelDataType relType =
         OpenSearchTypeFactory.convertExprTypeToRelDataType(OpenSearchFlatObjectType.of());
     assertAll(
         () -> assertEquals(SqlTypeName.MAP, relType.getSqlTypeName()),
         () -> assertEquals(SqlTypeName.VARCHAR, relType.getKeyType().getSqlTypeName()),
-        () -> assertEquals(SqlTypeName.VARCHAR, relType.getValueType().getSqlTypeName()),
+        () -> assertEquals(SqlTypeName.VARIANT, relType.getValueType().getSqlTypeName()),
         () -> assertTrue(relType.getValueType().isNullable()));
   }
 

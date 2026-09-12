@@ -17,8 +17,10 @@ import java.util.function.BiPredicate;
 import java.util.function.BinaryOperator;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
+import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.commons.lang3.tuple.Pair;
 import org.opensearch.sql.calcite.utils.OpenSearchTypeFactory;
 import org.opensearch.sql.data.type.ExprCoreType;
@@ -46,6 +48,10 @@ public final class CoercionUtils {
                         .toList())
             .toList();
 
+    if (hasVariant(arguments)) {
+      return castVariantArguments(builder, paramTypeCombinations, arguments);
+    }
+
     List<ExprType> sourceTypes =
         arguments.stream()
             .map(node -> OpenSearchTypeFactory.convertRelDataTypeToExprType(node.getType()))
@@ -66,6 +72,92 @@ public final class CoercionUtils {
         .map(Pair::getKey)
         .map(paramTypes -> castArguments(builder, paramTypes, arguments))
         .orElse(null);
+  }
+
+  /**
+   * Cast arguments when at least one is a VARIANT (a flat_object leaf). A variant carries its own
+   * runtime type and Calcite can cast it to any scalar type -- a numeric variant converts, a text
+   * one becomes null -- so the widening distance that ranks ordinary arguments does not apply. At
+   * each variant position the widest type any candidate signature accepts is chosen (DOUBLE among
+   * the numeric types), so that no precision is lost; the remaining positions are cast as usual.
+   * Returns null if no candidate signature fits the non-variant arguments.
+   */
+  private static @Nullable List<RexNode> castVariantArguments(
+      RexBuilder builder, List<List<ExprType>> paramTypeCombinations, List<RexNode> arguments) {
+    List<Integer> variantPositions = new ArrayList<>();
+    for (int i = 0; i < arguments.size(); i++) {
+      if (arguments.get(i).getType().getSqlTypeName() == SqlTypeName.VARIANT) {
+        variantPositions.add(i);
+      }
+    }
+    List<ExprType> chosen = null;
+    for (List<ExprType> paramTypes : paramTypeCombinations) {
+      if (paramTypes.size() != arguments.size() || !fitsOutsideVariants(paramTypes, arguments)) {
+        continue;
+      }
+      if (chosen == null) {
+        chosen = new ArrayList<>(paramTypes);
+        continue;
+      }
+      for (int position : variantPositions) {
+        chosen.set(position, widest(chosen.get(position), paramTypes.get(position)));
+      }
+    }
+    return chosen == null ? null : castArguments(builder, chosen, arguments);
+  }
+
+  /**
+   * Convert a VARIANT argument (a flat_object leaf) to the PPL type a function parameter declares.
+   *
+   * <p>A scalar target is a plain CAST, not the SAFE_CAST every other coercion uses: a variant's
+   * cast never throws -- Calcite's {@code VariantValue.cast} returns null for a value that is not
+   * of the target type -- so SAFE_CAST would add nothing, and it would break lambdas, because
+   * Calcite implements SAFE_CAST as a try/catch inside a generated inner class, which cannot
+   * capture a lambda parameter ("Cannot access non-final local variable from inner class").
+   *
+   * <p>An ARRAY target is {@code VARIANT_ARRAY}: PPL's array functions are written for a list of
+   * plain values, which is what it yields; see {@link #castVariantToArrayOfVariants} for the typed
+   * form.
+   */
+  public static RexNode castVariant(RexBuilder builder, RexNode variant, ExprType targetType) {
+    if (targetType == ExprCoreType.ARRAY) {
+      return builder.makeCall(PPLBuiltinOperators.VARIANT_ARRAY, variant);
+    }
+    return builder.makeCast(
+        OpenSearchTypeFactory.convertExprTypeToRelDataType(targetType), variant, true, false);
+  }
+
+  /**
+   * Cast a VARIANT argument to {@code ARRAY<VARIANT>}: each element stays the variant it is, so
+   * that a lambda parameter or an expanded row is typed VARIANT and keeps the element's own type.
+   * The element type is VARIANT rather than PPL's usual ANY because Calcite's runtime type
+   * information can describe VARIANT but not ANY.
+   */
+  public static RexNode castVariantToArrayOfVariants(RexBuilder builder, RexNode variant) {
+    RelDataType arrayOfVariant =
+        OpenSearchTypeFactory.TYPE_FACTORY.createArrayType(
+            OpenSearchTypeFactory.TYPE_FACTORY.createSqlType(SqlTypeName.VARIANT, true), -1);
+    return builder.makeCast(arrayOfVariant, variant, true, false);
+  }
+
+  /** Whether every non-variant argument can be cast to the candidate signature's type. */
+  private static boolean fitsOutsideVariants(List<ExprType> paramTypes, List<RexNode> arguments) {
+    for (int i = 0; i < arguments.size(); i++) {
+      if (arguments.get(i).getType().getSqlTypeName() == SqlTypeName.VARIANT) {
+        continue;
+      }
+      ExprType source =
+          OpenSearchTypeFactory.convertRelDataTypeToExprType(arguments.get(i).getType());
+      if (distance(source, paramTypes.get(i)) == IMPOSSIBLE_WIDENING) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** The wider of two candidate types; the first one if neither widens to the other. */
+  private static ExprType widest(ExprType current, ExprType candidate) {
+    return distance(current, candidate) != IMPOSSIBLE_WIDENING ? candidate : current;
   }
 
   /**
@@ -112,6 +204,9 @@ public final class CoercionUtils {
   }
 
   private static @Nullable RexNode cast(RexBuilder builder, ExprType targetType, RexNode arg) {
+    if (arg.getType().getSqlTypeName() == SqlTypeName.VARIANT) {
+      return castVariant(builder, arg, targetType);
+    }
     ExprType argType = OpenSearchTypeFactory.convertRelDataTypeToExprType(arg.getType());
     if (!argType.shouldCast(targetType)) {
       return arg;
@@ -177,6 +272,17 @@ public final class CoercionUtils {
         .map(RexNode::getType)
         .map(OpenSearchTypeFactory::convertRelDataTypeToExprType)
         .anyMatch(t -> t == ExprCoreType.STRING);
+  }
+
+  /**
+   * Whether any argument is a VARIANT (a flat_object leaf). A variant carries its own runtime type
+   * and can be cast to any scalar type -- a numeric variant converts, a text one becomes null -- so
+   * like a string argument it is eligible for coercion to the type a function expects.
+   */
+  public static boolean hasVariant(List<RexNode> rexNodeList) {
+    return rexNodeList.stream()
+        .map(RexNode::getType)
+        .anyMatch(t -> t.getSqlTypeName() == SqlTypeName.VARIANT);
   }
 
   private static final Set<ExprType> NUMBER_TYPES = ExprCoreType.numberTypes();
