@@ -152,6 +152,18 @@ public class CalcitePPLSpathTest extends CalcitePPLAbstractTest {
   }
 
   @Test
+  public void testDottedColumnNextToSpathMapSurvivesTheImplicitProjection() {
+    // A dotted column the query builds next to a spath map (`result.x` beside `result`) is not
+    // a leaf the mapping exposed side by side with its parent, so the implicit `fields *` keeps
+    // it; the nested-field clean-up applies to object parents (MAP<VARCHAR, ANY>) only.
+    withPPLQuery("source=EMP | spath input=ENAME output=result | eval result.x = 2")
+        .expectLogical(
+            "LogicalProject(EMPNO=[$0], ENAME=[$1], JOB=[$2], MGR=[$3], HIREDATE=[$4], SAL=[$5],"
+                + " COMM=[$6], DEPTNO=[$7], result=[JSON_EXTRACT_ALL($1)], result.x=[2])\n"
+                + "  LogicalTableScan(table=[[scott, EMP]])\n");
+  }
+
+  @Test
   public void testSpathAutoExtractModeWithSort() {
     withPPLQuery("source=EMP | spath input=ENAME output=result" + " | sort result.user.name")
         .expectLogical(

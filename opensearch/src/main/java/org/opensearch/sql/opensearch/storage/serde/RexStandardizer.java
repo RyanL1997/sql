@@ -39,6 +39,7 @@ import org.apache.calcite.util.Pair;
 import org.opensearch.sql.calcite.utils.OpenSearchTypeFactory;
 import org.opensearch.sql.data.type.ExprCoreType;
 import org.opensearch.sql.data.type.ExprType;
+import org.opensearch.sql.opensearch.data.type.OpenSearchFlatObjectType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchTextType;
 import org.opensearch.sql.opensearch.storage.script.CalciteScriptEngine.Source;
 
@@ -111,7 +112,10 @@ public class RexStandardizer extends RexBiVisitorImpl<RexNode, ScriptParameterHe
             ? null
             : OpenSearchTextType.toKeywordSubField(field.getName(), exprType);
     int newIndex = helper.sources.size();
-    if (docFieldName != null) {
+    if (exprType instanceof OpenSearchFlatObjectType) {
+      helper.digests.add(field.getName());
+      helper.sources.add(Source.FLAT_OBJECT.getValue());
+    } else if (docFieldName != null) {
       helper.digests.add(docFieldName);
       helper.sources.add(Source.DOC_VALUE.getValue());
     } else {

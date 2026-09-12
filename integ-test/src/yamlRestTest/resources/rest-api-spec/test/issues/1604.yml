@@ -1,0 +1,351 @@
+# Issue: https://github.com/opensearch-project/sql/issues/1604
+#        https://github.com/opensearch-project/sql/issues/3067
+# flat_object fields used to be dropped by OpenSearchDataType.parseMapping ("unknown type, skip
+# it"), so they were absent from the schema and any reference failed as "field not found".
+# The field is now a map keyed by dotted leaf path; every leaf value is a string, as the index
+# stores it. A nested object and a literal dotted key resolve to the same entry.
+#
+# Every pushed-down case is asserted twice, with pushdown on and off: the coordinator and the
+# data-node script read the field through the same flattening, so both paths must agree.
+setup:
+  - do:
+      indices.create:
+        index: otel
+        body:
+          settings:
+            number_of_shards: 1
+            number_of_replicas: 0
+          mappings:
+            properties:
+              service:
+                type: keyword
+              attributes:
+                type: flat_object
+
+  - do:
+      bulk:
+        refresh: true
+        body:
+          - '{"index": {"_index": "otel", "_id": "1"}}'
+          - '{"service": "checkout", "attributes": {"http.response.status_code": 500, "duration_ms": 12.5}}'
+          - '{"index": {"_index": "otel", "_id": "2"}}'
+          - '{"service": "payments", "attributes": {"http": {"response": {"status_code": 503}}, "duration_ms": "4"}}'
+          - '{"index": {"_index": "otel", "_id": "3"}}'
+          - '{"service": "search", "attributes": {"http.response.status_code": 200, "duration_ms": "n/a"}}'
+          - '{"index": {"_index": "otel", "_id": "4"}}'
+          - '{"service": "tags", "attributes": {"tags": ["a", "b"], "ports": [80, 443], "mixed": [1, "x"], "nested": [{"k": 1}, {"k": 2}]}}'
+
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.enabled: true
+            plugins.calcite.fallback.allowed: false
+            plugins.calcite.pushdown.enabled: true
+
+---
+teardown:
+  - do:
+      indices.delete:
+        index: otel
+        ignore_unavailable: true
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.enabled: null
+            plugins.calcite.fallback.allowed: null
+            plugins.calcite.pushdown.enabled: null
+
+---
+"describe lists the field as flat_object":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'describe otel | fields COLUMN_NAME, TYPE_NAME'
+  - match: {"datarows": [["attributes", "flat_object"], ["service", "string"]]}
+
+---
+"flat_object is projected as a map of dotted leaf path to string":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''payments'' | fields attributes'
+  - match: {"schema": [{"name": "attributes", "type": "struct"}]}
+  - match: {"datarows": [[{"duration_ms": "4", "http.response.status_code": "503"}]]}
+
+---
+"both spellings of a path resolve to the same leaf":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | fields service, attributes.http.response.status_code'
+  - match: {"schema.1.type": "string"}
+  - match: {"datarows": [["checkout", "500"], ["payments", "503"], ["search", "200"], ["tags", null]]}
+
+---
+"filter compares numerically across both spellings (pushdown on)":
+  - skip:
+      features: [headers]
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.pushdown.enabled: true
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.http.response.status_code >= 500 | fields service'
+  - match: {"datarows": [["checkout"], ["payments"]]}
+
+---
+"filter compares numerically across both spellings (pushdown off)":
+  - skip:
+      features: [headers]
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.pushdown.enabled: false
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.http.response.status_code >= 500 | fields service'
+  - match: {"datarows": [["checkout"], ["payments"]]}
+
+---
+"filter on a leaf that is not numeric in every record (pushdown on)":
+  - skip:
+      features: [headers]
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.pushdown.enabled: true
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.duration_ms > 10 | fields service'
+  - match: {"datarows": [["checkout"]]}
+
+---
+"filter on a leaf that is not numeric in every record (pushdown off)":
+  - skip:
+      features: [headers]
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.pushdown.enabled: false
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.duration_ms > 10 | fields service'
+  - match: {"datarows": [["checkout"]]}
+
+---
+"aggregate without a cast (pushdown on)":
+  - skip:
+      features: [headers]
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.pushdown.enabled: true
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | stats avg(attributes.duration_ms)'
+  - match: {"datarows": [[8.25]]}
+
+---
+"aggregate without a cast (pushdown off)":
+  - skip:
+      features: [headers]
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.pushdown.enabled: false
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | stats avg(attributes.duration_ms)'
+  - match: {"datarows": [[8.25]]}
+
+---
+"group by a leaf (pushdown on)":
+  - skip:
+      features: [headers]
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.pushdown.enabled: true
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | stats count() by attributes.duration_ms | sort attributes.duration_ms'
+  - match: {"datarows": [[1, null], [1, "12.5"], [1, "4"], [1, "n/a"]]}
+
+---
+"group by a leaf (pushdown off)":
+  - skip:
+      features: [headers]
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.pushdown.enabled: false
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | stats count() by attributes.duration_ms | sort attributes.duration_ms'
+  - match: {"datarows": [[1, null], [1, "12.5"], [1, "4"], [1, "n/a"]]}
+
+---
+"sort by a leaf is lexicographic, as for any string (pushdown on)":
+  - skip:
+      features: [headers]
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.pushdown.enabled: true
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | sort attributes.duration_ms | fields service, attributes.duration_ms'
+  - match: {"datarows": [["tags", null], ["checkout", "12.5"], ["payments", "4"], ["search", "n/a"]]}
+
+---
+"sort by a leaf is lexicographic, as for any string (pushdown off)":
+  - skip:
+      features: [headers]
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.pushdown.enabled: false
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | sort attributes.duration_ms | fields service, attributes.duration_ms'
+  - match: {"datarows": [["tags", null], ["checkout", "12.5"], ["payments", "4"], ["search", "n/a"]]}
+
+---
+"an array leaf becomes one string, the array's JSON text":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''tags'' | fields attributes.tags, attributes.mixed'
+  - match: {"schema": [{"name": "attributes.tags", "type": "string"}, {"name": "attributes.mixed", "type": "string"}]}
+  - match: {"datarows": [["[\"a\",\"b\"]", "[1,\"x\"]"]]}
+
+---
+"mvexpand on an array leaf has nothing to expand, the leaf being one string":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''tags'' | mvexpand attributes.tags | fields attributes.tags'
+  - match: {"schema": [{"name": "attributes.tags", "type": "string"}]}
+  - match: {"datarows": [["[\"a\",\"b\"]"]]}
+
+---
+"text equality on a leaf is answered by the inverted index alone":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl.explain:
+        body:
+          query: 'source=otel | where attributes.duration_ms = ''n/a'' | fields service'
+  - match:
+      calcite.physical: /.*term.*attributes\.duration_ms.*/
+  - match:
+      calcite.physical: /^(?:(?!opensearch_compounded_script)[\s\S])*$/
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.duration_ms = ''n/a'' | fields service'
+  - match: {"datarows": [["search"]]}
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.http.response.status_code = ''503'' | fields service'
+  - match: {"datarows": [["payments"]]}
+
+---
+"existence and prefix on a leaf use the index the same way":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl.explain:
+        body:
+          query: 'source=otel | where isnotnull(attributes.duration_ms) | fields service'
+  - match:
+      calcite.physical: /.*exists.*attributes\.duration_ms.*/
+  - match:
+      calcite.physical: /^(?:(?!opensearch_compounded_script)[\s\S])*$/
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where isnotnull(attributes.duration_ms) | fields service'
+  - match: {"datarows": [["checkout"], ["payments"], ["search"]]}
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where like(attributes.duration_ms, ''n/%'') | fields service'
+  - match: {"datarows": [["search"]]}
+
+---
+"text equality on an array leaf matches any element, as the index holds a term per element":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.tags = ''a'' | fields service'
+  - match: {"datarows": [["tags"]]}
+
+---
+"a negated leaf predicate":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where not attributes.duration_ms = ''n/a'' | fields service'
+  - match: {"datarows": [["checkout"], ["payments"]]}

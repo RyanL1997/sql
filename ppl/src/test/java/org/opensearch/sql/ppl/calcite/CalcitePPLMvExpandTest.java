@@ -43,7 +43,7 @@ public class CalcitePPLMvExpandTest extends CalcitePPLAbstractTest {
    * <p>This mirrors CalcitePPLExpandTest.TableWithArray.
    */
   public static class TableWithArray implements Table {
-    protected final RelProtoDataType protoRowType =
+    protected RelProtoDataType protoRowType =
         factory ->
             factory
                 .builder()
@@ -86,11 +86,32 @@ public class CalcitePPLMvExpandTest extends CalcitePPLAbstractTest {
     }
   }
 
+  /**
+   * A table with a map column, the shape of a {@code flat_object} field or a {@code spath} output.
+   */
+  public static class TableWithMap extends TableWithArray {
+    public TableWithMap() {
+      protoRowType =
+          factory ->
+              factory
+                  .builder()
+                  .add("DEPTNO", SqlTypeName.INTEGER)
+                  .add(
+                      "ATTRS",
+                      factory.createMapType(
+                          factory.createSqlType(SqlTypeName.VARCHAR),
+                          factory.createTypeWithNullability(
+                              factory.createSqlType(SqlTypeName.VARCHAR), true)))
+                  .build();
+    }
+  }
+
   @Override
   protected Frameworks.ConfigBuilder config(CalciteAssert.SchemaSpec... schemaSpecs) {
     final SchemaPlus rootSchema = Frameworks.createRootSchema(true);
     final SchemaPlus schema = CalciteAssert.addSchema(rootSchema, schemaSpecs);
     schema.add("DEPT", new TableWithArray());
+    schema.add("FLAT", new TableWithMap());
     return Frameworks.newConfigBuilder()
         .parserConfig(SqlParser.Config.DEFAULT)
         .defaultSchema(schema)
@@ -181,6 +202,23 @@ public class CalcitePPLMvExpandTest extends CalcitePPLAbstractTest {
     RelNode root = getRelNode("source=DEPT | mvexpand EMPNOS");
     assertContains(root, "LogicalCorrelate");
     assertContains(root, "Uncollect");
+  }
+
+  @Test
+  public void testMvExpandLeafOfMapColumnIsResolved() {
+    // The leaf is not a field of the schema, but it is resolved through the map; a scalar leaf is
+    // returned unchanged like any scalar field.
+    RelNode root = getRelNode("source=FLAT | mvexpand ATTRS.tags");
+    verifyLogical(root, "LogicalTableScan(table=[[scott, FLAT]])\n");
+  }
+
+  @Test
+  public void testMvExpandUnknownFieldUnderNonMapColumn() {
+    Exception ex =
+        Assert.assertThrows(Exception.class, () -> getRelNode("source=FLAT | mvexpand DEPTNO.x"));
+    Assert.assertTrue(
+        String.valueOf(ex.getMessage()),
+        ex.getMessage().contains("Field 'DEPTNO.x' not found in the schema"));
   }
 
   @Test

@@ -50,6 +50,7 @@ The table below list the mapping between OpenSearch Data Type, PPL Data Type and
 | binary | binary | VARBINARY |
 | object | struct | STRUCT |
 | nested | array | STRUCT |
+| flat_object | struct | STRUCT |
   
 Notes: Not all the PPL Type has correspond OpenSearch Type. e.g. data and time. To use function which required such data type, user should explicit convert the data type.
 ## Numeric Data Types  
@@ -113,6 +114,8 @@ A string is a sequence of characters enclosed in either single or double quotes.
 ## Query Struct Data Types  
 
 In PPL, the Struct Data Types corresponding to the [Object field type in OpenSearch](https://opensearch.org/docs/latest/field-types/supported-field-types/object/). The "." is used as the path selector when access the inner attribute of the struct data.
+
+A [flat_object field](https://opensearch.org/docs/latest/field-types/supported-field-types/flat-object/) is also presented as a struct, keyed by the dotted path of each leaf. Because a flat_object declares no sub-fields and indexes every leaf as a keyword term, every leaf value is a string, and a nested object and a literal dotted key (`{"a": {"b": 1}}` and `{"a.b": 1}`) resolve to the same entry `a.b`. Use `cast()` to work with a leaf as a number.
 ### Example: People  
 
 There are three fields in test index `people`: 1) deep nested object field `city`; 2) object field of array value `account`; 3) nested field `projects`

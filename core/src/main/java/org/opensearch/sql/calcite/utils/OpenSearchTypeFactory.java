@@ -206,6 +206,12 @@ public class OpenSearchTypeFactory extends JavaTypeFactoryImpl {
         return TYPE_FACTORY.createSqlType(SqlTypeName.GEOMETRY, nullable);
       } else if (fieldType.legacyTypeName().equalsIgnoreCase("text")) {
         return TYPE_FACTORY.createSqlType(SqlTypeName.VARCHAR, nullable);
+      } else if (fieldType.legacyTypeName().equalsIgnoreCase("flat_object")) {
+        // Keys are the dotted leaf paths; every leaf value is a string, as the index stores it.
+        return TYPE_FACTORY.createMapType(
+            TYPE_FACTORY.createSqlType(SqlTypeName.VARCHAR),
+            TYPE_FACTORY.createSqlType(SqlTypeName.VARCHAR, true),
+            nullable);
       } else if (fieldType.legacyTypeName().equalsIgnoreCase("ip")) {
         return TYPE_FACTORY.createUDT(ExprUDT.EXPR_IP, nullable);
       } else if (fieldType.getOriginalPath().isPresent()) {

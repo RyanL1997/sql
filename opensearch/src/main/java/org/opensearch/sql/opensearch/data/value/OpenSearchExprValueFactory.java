@@ -61,6 +61,7 @@ import org.opensearch.sql.data.type.ExprType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchBinaryType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchDataType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchDateType;
+import org.opensearch.sql.opensearch.data.type.OpenSearchFlatObjectType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchTextType;
 import org.opensearch.sql.opensearch.data.utils.Content;
 import org.opensearch.sql.opensearch.data.utils.ObjectContent;
@@ -230,6 +231,9 @@ public class OpenSearchExprValueFactory {
       } catch (ClassCastException e) {
         return ExprNullValue.of();
       }
+    } else if (type.equals(OpenSearchFlatObjectType.of())) {
+      // Shared with the pushed-down script path, so both read the field the same way.
+      return FlatObjectValues.flatten(content);
     } else if (typeActionMap.containsKey(type)) {
       if (content.isArray()) {
         return parseArray(content, field, type, supportArrays);
@@ -252,7 +256,7 @@ public class OpenSearchExprValueFactory {
    * field is numeric while the conflict's merged type is text. Render it as its string form rather
    * than letting the {@code (String) value} cast fail and null the value out.
    */
-  private static String stringOf(Content content) {
+  static String stringOf(Content content) {
     try {
       return content.stringValue();
     } catch (RuntimeException e) {

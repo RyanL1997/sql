@@ -663,13 +663,19 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
 
   /** See logic in {@link org.opensearch.sql.analysis.symbol.SymbolTable#lookupAllFields} */
   private static void tryToRemoveNestedFields(CalcitePlanContext context) {
-    Set<String> allFields = new HashSet<>(context.relBuilder.peek().getRowType().getFieldNames());
+    RelDataType rowType = context.relBuilder.peek().getRowType();
+    Set<String> allFields = new HashSet<>(rowType.getFieldNames());
     List<RexNode> duplicatedNestedFields =
         allFields.stream()
             .filter(
                 field -> {
                   int lastDot = field.lastIndexOf(".");
-                  return -1 != lastDot && allFields.contains(field.substring(0, lastDot));
+                  if (-1 == lastDot) {
+                    return false;
+                  }
+                  String parent = field.substring(0, lastDot);
+                  return allFields.contains(parent)
+                      && isMappingParent(rowType.getField(parent, true, false).getType());
                 })
             .map(field -> (RexNode) context.relBuilder.field(field))
             .toList();
@@ -1466,6 +1472,21 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     for (String overridden : overriddenNames) {
       dropStructParentsFor(overridden, context);
     }
+  }
+
+  /**
+   * Whether a column is a parent the mapping exposes side by side with its flattened leaf columns:
+   * an object (a struct, or {@code MAP<VARCHAR, ANY>}) or a nested field (an array). A map with any
+   * other value type -- a {@code flat_object} field, or the output of {@code spath} -- has no leaf
+   * columns of its own, so a dotted column next to it is one the query built and is kept.
+   */
+  private static boolean isMappingParent(RelDataType type) {
+    if (type.isStruct() || type.getSqlTypeName() == SqlTypeName.ARRAY) {
+      return true;
+    }
+    return type.getSqlTypeName() == SqlTypeName.MAP
+        && type.getValueType() != null
+        && type.getValueType().getSqlTypeName() == SqlTypeName.ANY;
   }
 
   /** An OpenSearch object parent surfaces as MAP in the row schema, a nested parent as ARRAY. */
@@ -4682,7 +4703,7 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     final RelDataTypeField inputField =
         inputType.getField(fieldName, /*caseSensitive*/ true, /*elideRecord*/ false);
 
-    if (inputField == null) {
+    if (inputField == null && !isLeafOfMapColumn(fieldName, inputType)) {
       throw ErrorReport.wrap(
               new SemanticCheckException(
                   String.format("Field '%s' not found in the schema", fieldName)))
@@ -4692,18 +4713,52 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
           .build();
     }
 
-    final RexInputRef arrayFieldRex = (RexInputRef) rexVisitor.analyze(field, context);
+    final RexNode fieldRex = rexVisitor.analyze(field, context);
 
-    final RelDataType fieldType = arrayFieldRex.getType();
+    final RelDataType fieldType = fieldRex.getType();
     if (!(SqlTypeUtil.isArray(fieldType) || SqlTypeUtil.isMultiset(fieldType))) {
       // For non-array/multiset fields (scalars), mvexpand just returns the field unchanged.
       // This treats single-value fields as if they were arrays with one element.
       return relBuilder.peek();
     }
 
-    buildExpandRelNode(arrayFieldRex, fieldName, fieldName, mvExpand.getLimit(), context);
+    final RexInputRef arrayFieldRex;
+    final String alias;
+    if (fieldRex instanceof RexInputRef ref) {
+      arrayFieldRex = ref;
+      alias = fieldName;
+    } else {
+      // A leaf of a map column is an expression, not a column of the input: project it under the
+      // leaf's own name so that it can be correlated and expanded like any array column. The
+      // expanded column then carries that name already, so there is nothing to rename -- and the
+      // rename's clean-up of nested fields must not run, as it would take the leaf for a
+      // sub-field of its map column and drop it.
+      List<RexNode> projects = new ArrayList<>(relBuilder.fields());
+      List<String> names = new ArrayList<>(inputType.getFieldNames());
+      projects.add(fieldRex);
+      names.add(fieldName);
+      relBuilder.project(projects, names);
+      arrayFieldRex = relBuilder.field(fieldName);
+      alias = null;
+    }
+
+    buildExpandRelNode(arrayFieldRex, fieldName, alias, mvExpand.getLimit(), context);
 
     return relBuilder.peek();
+  }
+
+  /**
+   * Whether a dotted name is a leaf under a map-typed column -- a {@code flat_object} field or the
+   * output of {@code spath} -- which the schema does not list as a field of its own but the
+   * expression visitor resolves to an item of the map.
+   */
+  private static boolean isLeafOfMapColumn(String name, RelDataType rowType) {
+    int dot = name.indexOf('.');
+    if (dot < 0) {
+      return false;
+    }
+    RelDataTypeField head = rowType.getField(name.substring(0, dot), true, false);
+    return head != null && head.getType().getSqlTypeName() == SqlTypeName.MAP;
   }
 
   @Override

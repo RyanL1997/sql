@@ -81,6 +81,7 @@ import org.opensearch.search.lookup.SourceLookup;
 import org.opensearch.sql.calcite.utils.CalciteClassLoaderHelper;
 import org.opensearch.sql.common.setting.Settings;
 import org.opensearch.sql.data.model.ExprTimestampValue;
+import org.opensearch.sql.opensearch.data.value.FlatObjectValues;
 import org.opensearch.sql.opensearch.storage.script.aggregation.CalciteAggregationScriptFactory;
 import org.opensearch.sql.opensearch.storage.script.field.CalciteFieldScriptFactory;
 import org.opensearch.sql.opensearch.storage.script.filter.CalciteFilterScriptFactory;
@@ -222,6 +223,7 @@ public class CalciteScriptEngine implements ScriptEngine {
         return switch (sources.get(index)) {
           case DOC_VALUE -> getFromDocValue((String) digests.get(index));
           case SOURCE -> getFromSource((String) digests.get(index));
+          case FLAT_OBJECT -> getFlatObjectFromSource((String) digests.get(index));
           case LITERAL -> digests.get(index);
         };
       } catch (Exception e) {
@@ -245,6 +247,15 @@ public class CalciteScriptEngine implements ScriptEngine {
       return value;
     }
 
+    /**
+     * A flat_object has no usable doc values (each is the folded {@code path=value} term) and its
+     * _source shape varies between documents. Read it from _source and flatten it exactly as the
+     * coordinator does, so a pushed-down expression sees the same map a projected row would.
+     */
+    public Object getFlatObjectFromSource(String name) {
+      return FlatObjectValues.flattenForScript(this.sourceLookup.extractValue(name, null));
+    }
+
     public Object getFromSource(String name) {
       // Resolve the field through the source path, not a flat map lookup: object subfields are
       // addressed as dotted paths (e.g. "log.user_agent") while _source stores them nested.
@@ -258,7 +269,9 @@ public class CalciteScriptEngine implements ScriptEngine {
   public enum Source {
     DOC_VALUE(0),
     SOURCE(1),
-    LITERAL(2);
+    LITERAL(2),
+    /** A flat_object field: read from _source and flattened to dotted leaf paths. */
+    FLAT_OBJECT(3);
 
     private final int value;
 

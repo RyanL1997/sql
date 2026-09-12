@@ -6,6 +6,7 @@
 package org.opensearch.sql.opensearch.request;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.spy;
@@ -57,6 +58,7 @@ import org.opensearch.sql.expression.function.BuiltinFunctionName;
 import org.opensearch.sql.expression.function.PPLFuncImpTable;
 import org.opensearch.sql.opensearch.data.type.OpenSearchDataType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchDataType.MappingType;
+import org.opensearch.sql.opensearch.data.type.OpenSearchFlatObjectType;
 import org.opensearch.sql.opensearch.request.PredicateAnalyzer.ExpressionNotAnalyzableException;
 import org.opensearch.sql.opensearch.request.PredicateAnalyzer.QueryExpression;
 
@@ -1692,5 +1694,169 @@ public class PredicateAnalyzerTest {
     // Second must clause should be script query (unpushable LIKE)
     QueryBuilder secondMust = boolQuery.must().get(1);
     assertInstanceOf(ScriptQueryBuilder.class, secondMust);
+  }
+
+  // ---- flat_object leaf predicates: the inverted index answers text questions; the script is
+  // ---- kept only where the index is not exact. A leaf is ITEM(<flat_object column>, 'key').
+
+  private static final String FLAT = "attributes";
+
+  private RelDataType flatMap(SqlTypeName valueType) {
+    return typeFactory.createMapType(
+        typeFactory.createSqlType(SqlTypeName.VARCHAR),
+        typeFactory.createTypeWithNullability(typeFactory.createSqlType(valueType), true));
+  }
+
+  /** A leaf of a map column whose values are text (the STRING option). */
+  private RexNode textLeaf(String key) {
+    return builder.makeCall(
+        SqlStdOperatorTable.ITEM,
+        builder.makeInputRef(flatMap(SqlTypeName.VARCHAR), 0),
+        builder.makeLiteral(key));
+  }
+
+  /** A leaf of a map column whose values keep their type (the VARIANT option), cast to text. */
+  private RexNode typedLeafAsText(String key) {
+    RexNode item =
+        builder.makeCall(
+            SqlStdOperatorTable.ITEM,
+            builder.makeInputRef(flatMap(SqlTypeName.VARIANT), 0),
+            builder.makeLiteral(key));
+    return builder.makeCast(typeFactory.createSqlType(SqlTypeName.VARCHAR), item, true, false);
+  }
+
+  private String analyzeFlat(RexNode call, SqlTypeName valueType)
+      throws ExpressionNotAnalyzableException {
+    Hook.CURRENT_TIME.addThread((Consumer<Holder<Long>>) h -> h.set(0L));
+    RelDataType rowType =
+        typeFactory
+            .builder()
+            .kind(StructKind.FULLY_QUALIFIED)
+            .add(FLAT, flatMap(valueType))
+            .build();
+    return PredicateAnalyzer.analyzeExpression(
+            call, List.of(FLAT), Map.of(FLAT, OpenSearchFlatObjectType.of()), rowType, cluster)
+        .builder()
+        .toString();
+  }
+
+  private static final String SCRIPT = "opensearch_compounded_script";
+
+  @Test
+  void flatObjectLeaf_textEquality_isATermQueryAlone() throws ExpressionNotAnalyzableException {
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.EQUALS, textLeaf("duration_ms"), builder.makeLiteral("n/a"));
+    String query = analyzeFlat(call, SqlTypeName.VARCHAR);
+    assertTrue(query.contains("\"term\""), query);
+    assertTrue(query.contains("\"attributes.duration_ms\""), query);
+    assertTrue(query.contains("\"value\" : \"n/a\""), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_typedLeafWithTextThatIsNotANumber_isATermQueryAlone()
+      throws ExpressionNotAnalyzableException {
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.EQUALS, builder.makeLiteral("n/a"), typedLeafAsText("duration_ms"));
+    String query = analyzeFlat(call, SqlTypeName.VARIANT);
+    assertTrue(query.contains("\"term\""), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_typedLeafWithTextThatSpellsANumber_keepsTheScript()
+      throws ExpressionNotAnalyzableException {
+    // the number 500 and the text "500" share a term; only the text is equal to '500'
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.EQUALS, typedLeafAsText("status_code"), builder.makeLiteral("500"));
+    String query = analyzeFlat(call, SqlTypeName.VARIANT);
+    assertTrue(query.contains("\"term\""), query);
+    assertTrue(query.contains(SCRIPT), query);
+    assertTrue(query.contains("\"filter\""), query);
+  }
+
+  @Test
+  void flatObjectLeaf_textLeafWithTextThatSpellsANumber_isATermQueryAlone()
+      throws ExpressionNotAnalyzableException {
+    // under STRING every value is text, so the term is exact
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.EQUALS, textLeaf("status_code"), builder.makeLiteral("500"));
+    String query = analyzeFlat(call, SqlTypeName.VARCHAR);
+    assertTrue(query.contains("\"term\""), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_numericEquality_staysAScript() throws ExpressionNotAnalyzableException {
+    // the index cannot answer a numeric question: it holds only text
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.EQUALS,
+            builder.makeCast(
+                typeFactory.createSqlType(SqlTypeName.DOUBLE), textLeaf("status_code"), true, true),
+            builder.makeExactLiteral(new BigDecimal(500)));
+    String query = analyzeFlat(call, SqlTypeName.VARCHAR);
+    assertFalse(query.contains("\"term\""), query);
+    assertTrue(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_isNotNull_isAnExistsQueryAlone() throws ExpressionNotAnalyzableException {
+    RexNode call = builder.makeCall(SqlStdOperatorTable.IS_NOT_NULL, textLeaf("duration_ms"));
+    String query = analyzeFlat(call, SqlTypeName.VARCHAR);
+    assertTrue(query.contains("\"exists\""), query);
+    assertTrue(query.contains("\"field\" : \"attributes.duration_ms\""), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_prefixLike_isAPrefixQueryAlone() throws ExpressionNotAnalyzableException {
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.LIKE, textLeaf("duration_ms"), builder.makeLiteral("n/%"));
+    String query = analyzeFlat(call, SqlTypeName.VARCHAR);
+    assertTrue(query.contains("\"prefix\""), query);
+    assertTrue(query.contains("\"value\" : \"n/\""), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_typedLeafWithAPrefixANumberCouldStartWith_keepsTheScript()
+      throws ExpressionNotAnalyzableException {
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.LIKE, typedLeafAsText("status_code"), builder.makeLiteral("5%"));
+    String query = analyzeFlat(call, SqlTypeName.VARIANT);
+    assertTrue(query.contains("\"prefix\""), query);
+    assertTrue(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_infixLike_staysAScript() throws ExpressionNotAnalyzableException {
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.LIKE, textLeaf("duration_ms"), builder.makeLiteral("%/a"));
+    String query = analyzeFlat(call, SqlTypeName.VARCHAR);
+    assertFalse(query.contains("\"prefix\""), query);
+    assertTrue(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_negated_keepsTheScriptUnderMustNot() throws ExpressionNotAnalyzableException {
+    // NOT null is null: a record without the leaf must stay excluded, which the index alone
+    // under must_not would not do
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.NOT,
+            builder.makeCall(
+                SqlStdOperatorTable.EQUALS, textLeaf("duration_ms"), builder.makeLiteral("n/a")));
+    String query = analyzeFlat(call, SqlTypeName.VARCHAR);
+    assertTrue(query.contains("\"must_not\""), query);
+    assertTrue(query.contains("\"term\""), query);
+    assertTrue(query.contains(SCRIPT), query);
   }
 }
