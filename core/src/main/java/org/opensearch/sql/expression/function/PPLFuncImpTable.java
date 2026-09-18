@@ -320,6 +320,7 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.sql.calcite.CalcitePlanContext;
+import org.opensearch.sql.calcite.plan.FlatObjectScopeValidator;
 import org.opensearch.sql.calcite.utils.PPLOperandTypes;
 import org.opensearch.sql.calcite.utils.PlanUtils;
 import org.opensearch.sql.calcite.utils.UserDefinedFunctionUtils;
@@ -585,6 +586,9 @@ public class PPLFuncImpTable {
         coercionNodes = CoercionUtils.castArguments(rexBuilder, signature.typeChecker(), fields);
       }
       if (coercionNodes == null) {
+        if (hasVariant(argTypes)) {
+          throw FlatObjectScopeValidator.unsupportedFunction(functionName.getName().toString());
+        }
         String errorMessagePattern =
             argTypes.size() <= 1
                 ? "Aggregation function %s expects field type {%s}, but got %s"
@@ -599,6 +603,11 @@ public class PPLFuncImpTable {
       }
     }
     return coercionNodes;
+  }
+
+  /** Whether any argument is a VARIANT, the type of a flat_object leaf. */
+  private static boolean hasVariant(List<RelDataType> argTypes) {
+    return argTypes.stream().anyMatch(t -> t.getSqlTypeName() == SqlTypeName.VARIANT);
   }
 
   private Pair<CalciteFuncSignature, AggHandler> getImplementation(
@@ -664,6 +673,9 @@ public class PPLFuncImpTable {
               "Cannot resolve function: %s, arguments: %s, caused by: %s",
               functionName, PlanUtils.getActualSignature(argTypes), e.getMessage()),
           e);
+    }
+    if (hasVariant(argTypes)) {
+      throw FlatObjectScopeValidator.unsupportedFunction(functionName.getName().toString());
     }
     StringJoiner allowedSignatures = new StringJoiner(",");
     for (var implement : implementList) {

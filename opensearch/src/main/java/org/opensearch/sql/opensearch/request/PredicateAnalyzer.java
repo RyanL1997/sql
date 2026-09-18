@@ -106,6 +106,7 @@ import org.opensearch.sql.data.type.ExprCoreType;
 import org.opensearch.sql.data.type.ExprType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchAliasType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchDataType;
+import org.opensearch.sql.opensearch.data.type.OpenSearchFlatObjectType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchTextType;
 import org.opensearch.sql.opensearch.storage.script.CalciteScriptEngine.UnsupportedScriptException;
 import org.opensearch.sql.opensearch.storage.script.CompoundedScriptEngine.ScriptEngineType;
@@ -371,6 +372,11 @@ public class PredicateAnalyzer {
         throw new PredicateAnalyzerException(message);
       }
 
+      QueryExpression leafPredicate = flatObjectLeafPredicate(call);
+      if (leafPredicate != null) {
+        return leafPredicate;
+      }
+
       switch (syntax) {
         case BINARY, INTERNAL:
           return binary(call);
@@ -401,6 +407,137 @@ public class PredicateAnalyzer {
           String message =
               format(Locale.ROOT, "Unsupported syntax [%s] for call: [%s]", syntax, call);
           throw new PredicateAnalyzerException(message);
+      }
+    }
+
+    /**
+     * A predicate on a flat_object leaf -- exact text, existence, or a leading prefix -- is
+     * answered by the inverted index alone, exactly as the same DSL query is: the index holds every
+     * leaf as a keyword term with the path folded in ({@code attributes.duration_ms=n/a}), so a
+     * term, exists or prefix query on the dotted path is the whole answer and no record is opened.
+     * Nothing else reaches here: a predicate on a leaf that the index cannot answer exactly is
+     * rejected while the plan is built (see {@code FlatObjectScopeValidator}). Returns null when
+     * the call is not such a predicate.
+     */
+    private @Nullable QueryExpression flatObjectLeafPredicate(RexCall call) {
+      List<RexNode> operands = call.getOperands();
+      switch (call.getKind()) {
+        case EQUALS -> {
+          for (int i = 0; i < 2; i++) {
+            String path = flatObjectLeafPath(operands.get(i));
+            if (path != null
+                && operands.get(1 - i) instanceof RexLiteral literal
+                && isText(literal)) {
+              return new FlatObjectLeafQueryExpression(
+                  QueryBuilders.termQuery(path, RexLiteral.stringValue(literal)), call);
+            }
+          }
+        }
+        case IS_NOT_NULL -> {
+          String path = flatObjectLeafPath(operands.get(0));
+          if (path != null) {
+            return new FlatObjectLeafQueryExpression(QueryBuilders.existsQuery(path), call);
+          }
+        }
+        case IS_NULL -> {
+          String path = flatObjectLeafPath(operands.get(0));
+          if (path != null) {
+            return new FlatObjectLeafQueryExpression(
+                boolQuery().mustNot(QueryBuilders.existsQuery(path)), call);
+          }
+        }
+        case LIKE -> {
+          String path = flatObjectLeafPath(operands.get(0));
+          if (path != null
+              && operands.get(1) instanceof RexLiteral pattern
+              && isText(pattern)
+              && call.getOperator() instanceof SqlLikeOperator like) {
+            String text = RexLiteral.stringValue(pattern);
+            // a leading literal prefix, then '%' and nothing else: a prefix query, matched
+            // case-insensitively when the operator is ILIKE
+            if (text.endsWith("%")
+                && !text.substring(0, text.length() - 1).matches(".*[%_\\\\].*")) {
+              return new FlatObjectLeafQueryExpression(
+                  QueryBuilders.prefixQuery(path, text.substring(0, text.length() - 1))
+                      .caseInsensitive(!like.isCaseSensitive()),
+                  call);
+            }
+          }
+        }
+        default -> {}
+      }
+      return null;
+    }
+
+    private static boolean isText(RexLiteral literal) {
+      return SqlTypeFamily.CHARACTER.contains(literal.getType());
+    }
+
+    /**
+     * The DSL path of a flat_object leaf reference -- {@code ITEM(<flat_object column>, '<key>')},
+     * possibly under a cast to a character type -- as {@code column.key}; null for anything else.
+     */
+    private @Nullable String flatObjectLeafPath(RexNode node) {
+      while (node instanceof RexCall cast
+          && (cast.getKind() == SqlKind.CAST || cast.getKind() == SqlKind.SAFE_CAST)
+          && SqlTypeFamily.CHARACTER.contains(cast.getType())) {
+        node = cast.getOperands().get(0);
+      }
+      if (!(node instanceof RexCall item) || item.getKind() != SqlKind.ITEM) {
+        return null;
+      }
+      if (!(item.getOperands().get(0) instanceof RexInputRef ref)
+          || !(item.getOperands().get(1) instanceof RexLiteral key)
+          || !isText(key)) {
+        return null;
+      }
+      String column = ref.getIndex() < schema.size() ? schema.get(ref.getIndex()) : null;
+      if (column == null || !(fieldTypes.get(column) instanceof OpenSearchFlatObjectType)) {
+        return null;
+      }
+      return column + "." + RexLiteral.stringValue(key);
+    }
+
+    /** An index lookup on a flat_object leaf: the whole answer, with no script. */
+    static class FlatObjectLeafQueryExpression extends QueryExpression {
+      private final QueryBuilder indexFilter;
+      private final boolean negated;
+      private List<RexNode> analyzedNodes;
+
+      FlatObjectLeafQueryExpression(QueryBuilder indexFilter, RexNode node) {
+        this(indexFilter, node, false);
+      }
+
+      private FlatObjectLeafQueryExpression(
+          QueryBuilder indexFilter, RexNode node, boolean negated) {
+        this.indexFilter = indexFilter;
+        this.negated = negated;
+        this.analyzedNodes = List.of(node);
+      }
+
+      @Override
+      public QueryBuilder builder() {
+        return negated ? boolQuery().mustNot(indexFilter) : indexFilter;
+      }
+
+      @Override
+      public QueryExpression not() {
+        return new FlatObjectLeafQueryExpression(indexFilter, analyzedNodes.getFirst(), !negated);
+      }
+
+      @Override
+      public List<RexNode> getAnalyzedNodes() {
+        return analyzedNodes;
+      }
+
+      @Override
+      public void updateAnalyzedNodes(RexNode rexNode) {
+        this.analyzedNodes = List.of(rexNode);
+      }
+
+      @Override
+      public List<RexNode> getUnAnalyzableNodes() {
+        return List.of();
       }
     }
 
@@ -1696,6 +1833,15 @@ public class PredicateAnalyzer {
               .map(rowType.getFieldNames()::get)
               .toList();
       this.fieldTypes = fieldTypes;
+      // A flat_object field cannot be read by a script: it has no usable doc values, and reading
+      // it from _source would open every record. Refuse here, while the caller can still fall
+      // back, rather than when the script is generated.
+      for (String field : referredFields) {
+        if (fieldTypes.get(field) instanceof OpenSearchFlatObjectType) {
+          throw new UnsupportedScriptException(
+              "A flat_object field cannot be read by a pushed-down script: " + field);
+        }
+      }
     }
 
     // For filter script, this method will be called after planning phase;

@@ -39,8 +39,10 @@ import org.apache.calcite.util.Pair;
 import org.opensearch.sql.calcite.utils.OpenSearchTypeFactory;
 import org.opensearch.sql.data.type.ExprCoreType;
 import org.opensearch.sql.data.type.ExprType;
+import org.opensearch.sql.opensearch.data.type.OpenSearchFlatObjectType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchTextType;
 import org.opensearch.sql.opensearch.storage.script.CalciteScriptEngine.Source;
+import org.opensearch.sql.opensearch.storage.script.CalciteScriptEngine.UnsupportedScriptException;
 
 /**
  * This help standardizes the RexNode expression, the process including:
@@ -111,6 +113,13 @@ public class RexStandardizer extends RexBiVisitorImpl<RexNode, ScriptParameterHe
             ? null
             : OpenSearchTextType.toKeywordSubField(field.getName(), exprType);
     int newIndex = helper.sources.size();
+    if (exprType instanceof OpenSearchFlatObjectType) {
+      // A flat_object has no usable doc values (each is the folded path=value term) and reading it
+      // from _source would mean opening every record -- the cost PPL does not pay on this type. A
+      // query that would need it is rejected while the plan is built; this is the backstop.
+      throw new UnsupportedScriptException(
+          "A flat_object field cannot be read by a pushed-down script: " + field.getName());
+    }
     if (docFieldName != null) {
       helper.digests.add(docFieldName);
       helper.sources.add(Source.DOC_VALUE.getValue());

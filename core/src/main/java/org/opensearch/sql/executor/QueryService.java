@@ -45,6 +45,7 @@ import org.opensearch.sql.calcite.CalcitePlanContext;
 import org.opensearch.sql.calcite.CalciteRelNodeVisitor;
 import org.opensearch.sql.calcite.OpenSearchSchema;
 import org.opensearch.sql.calcite.SysLimit;
+import org.opensearch.sql.calcite.plan.FlatObjectScopeValidator;
 import org.opensearch.sql.calcite.plan.rel.LogicalSystemLimit;
 import org.opensearch.sql.calcite.plan.rel.LogicalSystemLimit.SystemLimitType;
 import org.opensearch.sql.calcite.utils.CalciteClassLoaderHelper;
@@ -591,7 +592,9 @@ public class QueryService {
   }
 
   public RelNode analyze(UnresolvedPlan plan, CalcitePlanContext context) {
-    return getRelNodeVisitor().analyze(plan, context);
+    RelNode relNode = getRelNodeVisitor().analyze(plan, context);
+    FlatObjectScopeValidator.validate(relNode);
+    return relNode;
   }
 
   /** Analyze {@link UnresolvedPlan}. */

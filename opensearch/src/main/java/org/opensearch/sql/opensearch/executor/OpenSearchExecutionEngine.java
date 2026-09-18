@@ -28,6 +28,7 @@ import org.apache.calcite.rel.externalize.RelJsonWriter;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.runtime.Hook;
+import org.apache.calcite.runtime.variant.VariantValue;
 import org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlOperatorTable;
@@ -65,6 +66,7 @@ import org.opensearch.sql.expression.function.PPLFuncImpTable;
 import org.opensearch.sql.monitor.profile.MetricName;
 import org.opensearch.sql.monitor.profile.ProfileScope;
 import org.opensearch.sql.opensearch.client.OpenSearchClient;
+import org.opensearch.sql.opensearch.data.value.OpenSearchExprFlatObjectValue;
 import org.opensearch.sql.opensearch.data.value.OpenSearchExprGeoPointValue;
 import org.opensearch.sql.opensearch.executor.protector.ExecutionProtector;
 import org.opensearch.sql.opensearch.functions.DistinctCountApproxAggFunction;
@@ -395,6 +397,11 @@ public class OpenSearchExecutionEngine implements ExecutionEngine {
     if (value instanceof Point point) {
       return new OpenSearchExprGeoPointValue(point.getY(), point.getX());
     }
+    if (value instanceof VariantValue variant) {
+      // A VARIANT (a flat_object leaf) carries its own runtime type; hand back the value it wraps
+      // so the row is typed by what the document recorded.
+      return processValue(OpenSearchExprFlatObjectValue.unwrap(variant), null);
+    }
     if (value instanceof Map) {
       Map<String, Object> map = (Map<String, Object>) value;
       Map<String, Object> convertedMap = new HashMap<>();
@@ -466,6 +473,17 @@ public class OpenSearchExecutionEngine implements ExecutionEngine {
           // Using UNDEFINED instead of UNKNOWN to avoid throwing exception
           exprType = ExprCoreType.UNDEFINED;
         }
+      } else if (fieldType.getSqlTypeName() == SqlTypeName.VARIANT) {
+        // A VARIANT column (a flat_object leaf) has no static type by design: it takes the type of
+        // its runtime value. The first non-null value decides, since a record that did not write
+        // the leaf says nothing about it.
+        exprType =
+            values.stream()
+                .map(row -> row.tupleValue().get(columnName))
+                .filter(value -> value != null && !value.isNull())
+                .map(ExprValue::type)
+                .findFirst()
+                .orElse(ExprCoreType.UNDEFINED);
       } else {
         exprType = OpenSearchTypeFactory.convertRelDataTypeToExprType(fieldType);
       }

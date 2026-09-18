@@ -6,7 +6,9 @@
 package org.opensearch.sql.opensearch.request;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.spy;
 
@@ -28,6 +30,7 @@ import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUnknownAs;
 import org.apache.calcite.runtime.Hook;
+import org.apache.calcite.sql.fun.SqlLibraryOperators;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.util.Holder;
@@ -57,6 +60,7 @@ import org.opensearch.sql.expression.function.BuiltinFunctionName;
 import org.opensearch.sql.expression.function.PPLFuncImpTable;
 import org.opensearch.sql.opensearch.data.type.OpenSearchDataType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchDataType.MappingType;
+import org.opensearch.sql.opensearch.data.type.OpenSearchFlatObjectType;
 import org.opensearch.sql.opensearch.request.PredicateAnalyzer.ExpressionNotAnalyzableException;
 import org.opensearch.sql.opensearch.request.PredicateAnalyzer.QueryExpression;
 
@@ -1692,5 +1696,140 @@ public class PredicateAnalyzerTest {
     // Second must clause should be script query (unpushable LIKE)
     QueryBuilder secondMust = boolQuery.must().get(1);
     assertInstanceOf(ScriptQueryBuilder.class, secondMust);
+  }
+
+  // ---- flat_object leaf predicates: the inverted index answers them alone, with no script.
+  // ---- A leaf is ITEM(<flat_object column>, 'key'); anything the index cannot answer exactly is
+  // ---- rejected while the plan is built, so it never reaches here.
+
+  private static final String FLAT = "attributes";
+
+  private RelDataType flatMap(SqlTypeName valueType) {
+    return typeFactory.createMapType(
+        typeFactory.createSqlType(SqlTypeName.VARCHAR),
+        typeFactory.createTypeWithNullability(typeFactory.createSqlType(valueType), true));
+  }
+
+  private RexNode leaf(String key) {
+    return builder.makeCall(
+        SqlStdOperatorTable.ITEM,
+        builder.makeInputRef(flatMap(SqlTypeName.VARIANT), 0),
+        builder.makeLiteral(key));
+  }
+
+  /** The shape a leaf takes when it is compared with text: a cast to VARCHAR over the item. */
+  private RexNode leafAsText(String key) {
+    return builder.makeCast(typeFactory.createSqlType(SqlTypeName.VARCHAR), leaf(key), true, false);
+  }
+
+  private String analyzeFlat(RexNode call) throws ExpressionNotAnalyzableException {
+    Hook.CURRENT_TIME.addThread((Consumer<Holder<Long>>) h -> h.set(0L));
+    RelDataType rowType =
+        typeFactory
+            .builder()
+            .kind(StructKind.FULLY_QUALIFIED)
+            .add(FLAT, flatMap(SqlTypeName.VARIANT))
+            .build();
+    return PredicateAnalyzer.analyzeExpression(
+            call, List.of(FLAT), Map.of(FLAT, OpenSearchFlatObjectType.of()), rowType, cluster)
+        .builder()
+        .toString();
+  }
+
+  private static final String SCRIPT = "opensearch_compounded_script";
+
+  @Test
+  void flatObjectLeaf_textEquality_isATermQueryAlone() throws ExpressionNotAnalyzableException {
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.EQUALS, leafAsText("duration_ms"), builder.makeLiteral("n/a"));
+    String query = analyzeFlat(call);
+    assertTrue(query.contains("\"term\""), query);
+    assertTrue(query.contains("\"attributes.duration_ms\""), query);
+    assertTrue(query.contains("\"value\" : \"n/a\""), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_textEqualityWithTheLiteralFirst_isATermQueryAlone()
+      throws ExpressionNotAnalyzableException {
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.EQUALS, builder.makeLiteral("n/a"), leafAsText("duration_ms"));
+    String query = analyzeFlat(call);
+    assertTrue(query.contains("\"term\""), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_isNotNull_isAnExistsQueryAlone() throws ExpressionNotAnalyzableException {
+    String query =
+        analyzeFlat(builder.makeCall(SqlStdOperatorTable.IS_NOT_NULL, leaf("duration_ms")));
+    assertTrue(query.contains("\"exists\""), query);
+    assertTrue(query.contains("\"field\" : \"attributes.duration_ms\""), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_isNull_isMustNotExistsAlone() throws ExpressionNotAnalyzableException {
+    String query = analyzeFlat(builder.makeCall(SqlStdOperatorTable.IS_NULL, leaf("duration_ms")));
+    assertTrue(query.contains("\"must_not\""), query);
+    assertTrue(query.contains("\"exists\""), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_prefixLike_isAPrefixQueryAlone() throws ExpressionNotAnalyzableException {
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.LIKE, leafAsText("duration_ms"), builder.makeLiteral("n/%"));
+    String query = analyzeFlat(call);
+    assertTrue(query.contains("\"prefix\""), query);
+    assertTrue(query.contains("\"value\" : \"n/\""), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_caseInsensitiveLike_isACaseInsensitivePrefixQuery()
+      throws ExpressionNotAnalyzableException {
+    RexNode call =
+        builder.makeCall(
+            SqlLibraryOperators.ILIKE, leafAsText("duration_ms"), builder.makeLiteral("N/%"));
+    String query = analyzeFlat(call);
+    assertTrue(query.contains("\"prefix\""), query);
+    assertTrue(query.contains("\"case_insensitive\" : true"), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  @Test
+  void flatObjectLeaf_negated_isMustNotOfTheIndexQuery() throws ExpressionNotAnalyzableException {
+    RexNode call =
+        builder.makeCall(
+            SqlStdOperatorTable.NOT,
+            builder.makeCall(
+                SqlStdOperatorTable.EQUALS, leafAsText("duration_ms"), builder.makeLiteral("n/a")));
+    String query = analyzeFlat(call);
+    assertTrue(query.contains("\"must_not\""), query);
+    assertTrue(query.contains("\"term\""), query);
+    assertFalse(query.contains(SCRIPT), query);
+  }
+
+  // Anything the index cannot answer -- a numeric comparison, an infix pattern -- would need a
+  // script over _source, and a flat_object field is never read by a script: the analyzer refuses
+  // it, and the caller falls back instead of scanning every record. Queries of this shape are
+  // rejected before pushdown anyway (see CalcitePPLFlatObjectScopeTest).
+  @Test
+  void flatObjectLeaf_anythingNeedingAScript_isRefused() {
+    RexNode numeric =
+        builder.makeCall(
+            SqlStdOperatorTable.GREATER_THAN,
+            builder.makeCast(
+                typeFactory.createSqlType(SqlTypeName.DOUBLE), leaf("duration_ms"), true, true),
+            builder.makeExactLiteral(new BigDecimal(50)));
+    RexNode infixLike =
+        builder.makeCall(
+            SqlStdOperatorTable.LIKE, leafAsText("duration_ms"), builder.makeLiteral("%/a"));
+    assertThrows(ExpressionNotAnalyzableException.class, () -> analyzeFlat(numeric));
+    assertThrows(ExpressionNotAnalyzableException.class, () -> analyzeFlat(infixLike));
   }
 }
