@@ -50,6 +50,7 @@ The table below list the mapping between OpenSearch Data Type, PPL Data Type and
 | binary | binary | VARBINARY |
 | object | struct | STRUCT |
 | nested | array | STRUCT |
+| flat_object | struct | STRUCT |
   
 Notes: Not all the PPL Type has correspond OpenSearch Type. e.g. data and time. To use function which required such data type, user should explicit convert the data type.
 ## Numeric Data Types  
@@ -113,6 +114,15 @@ A string is a sequence of characters enclosed in either single or double quotes.
 ## Query Struct Data Types  
 
 In PPL, the Struct Data Types corresponding to the [Object field type in OpenSearch](https://opensearch.org/docs/latest/field-types/supported-field-types/object/). The "." is used as the path selector when access the inner attribute of the struct data.
+
+A [flat_object field](https://opensearch.org/docs/latest/field-types/supported-field-types/flat-object/) is also presented as a struct, keyed by the dotted path of each leaf. A flat_object declares no sub-fields, so each leaf keeps the type it was written with in the document: `12.5` is a number and `"4"` is text. A nested object and a literal dotted key (`{"a": {"b": 1}}` and `{"a.b": 1}`) resolve to the same entry `a.b`, and an array leaf is an array whose elements keep their own types.
+
+What a query can do with a flat_object leaf follows what the field's index can answer. OpenSearch indexes every leaf value as a keyword term, so it can find a leaf by its text in one lookup but cannot compare, aggregate or sort a leaf as a number without reading every record. PPL therefore supports, on a flat_object leaf:
+
+- projecting it: `fields attributes.duration_ms`, `eval d = attributes.duration_ms`;
+- filtering it by text: `where attributes.namespace = 'prod'`, `where isnotnull(attributes.error.type)`, `where isnull(...)`, `where like(attributes.namespace, 'ns-%')` (a leading prefix), combined with `and` / `or` and with filters on other fields.
+
+Anything else that touches a leaf — a numeric comparison (`where attributes.duration_ms > 10`), an aggregation (`stats avg(attributes.duration_ms)`), a group-by, a sort, a negated text filter, or an expression over the leaf — is rejected at planning time with an error that states this limitation.
 ### Example: People  
 
 There are three fields in test index `people`: 1) deep nested object field `city`; 2) object field of array value `account`; 3) nested field `projects`

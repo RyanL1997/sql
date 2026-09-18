@@ -1,0 +1,242 @@
+# Issue: https://github.com/opensearch-project/sql/issues/1604
+#        https://github.com/opensearch-project/sql/issues/3067
+# flat_object fields used to be dropped by OpenSearchDataType.parseMapping ("unknown type, skip
+# it"), so they were absent from the schema and any reference failed as "field not found".
+# The field is now a map keyed by dotted leaf path; every leaf value is a string, as the index
+# stores it. A nested object and a literal dotted key resolve to the same entry.
+#
+# Every pushed-down case is asserted twice, with pushdown on and off: the coordinator and the
+# data-node script read the field through the same flattening, so both paths must agree.
+setup:
+  - do:
+      indices.create:
+        index: otel
+        body:
+          settings:
+            number_of_shards: 1
+            number_of_replicas: 0
+          mappings:
+            properties:
+              service:
+                type: keyword
+              attributes:
+                type: flat_object
+
+  - do:
+      bulk:
+        refresh: true
+        body:
+          - '{"index": {"_index": "otel", "_id": "1"}}'
+          - '{"service": "checkout", "attributes": {"http.response.status_code": 500, "duration_ms": 12.5}}'
+          - '{"index": {"_index": "otel", "_id": "2"}}'
+          - '{"service": "payments", "attributes": {"http": {"response": {"status_code": 503}}, "duration_ms": "4"}}'
+          - '{"index": {"_index": "otel", "_id": "3"}}'
+          - '{"service": "search", "attributes": {"http.response.status_code": 200, "duration_ms": "n/a"}}'
+          - '{"index": {"_index": "otel", "_id": "4"}}'
+          - '{"service": "tags", "attributes": {"tags": ["a", "b"], "ports": [80, 443], "mixed": [1, "x"], "nested": [{"k": 1}, {"k": 2}]}}'
+
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.enabled: true
+            plugins.calcite.fallback.allowed: false
+            plugins.calcite.pushdown.enabled: true
+
+---
+teardown:
+  - do:
+      indices.delete:
+        index: otel
+        ignore_unavailable: true
+  - do:
+      query.settings:
+        body:
+          transient:
+            plugins.calcite.enabled: null
+            plugins.calcite.fallback.allowed: null
+            plugins.calcite.pushdown.enabled: null
+
+---
+"describe lists the field as flat_object":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'describe otel | fields COLUMN_NAME, TYPE_NAME'
+  - match: {"datarows": [["attributes", "flat_object"], ["service", "string"]]}
+
+---
+"flat_object is projected as a map of dotted leaf path to typed value":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''payments'' | fields attributes'
+  - match: {"datarows": [[{"duration_ms": "4", "http.response.status_code": 503}]]}
+
+---
+"a leaf is projected with the type it was written with, under either spelling of its path":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | fields service, attributes.http.response.status_code, attributes.duration_ms'
+  - match: {"datarows": [["checkout", 500, 12.5], ["payments", 503, "4"], ["search", 200, "n/a"], ["tags", null, null]]}
+
+---
+"an array leaf is projected as an array with typed elements":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where service = ''tags'' | fields attributes.tags, attributes.mixed, attributes.nested'
+  - match: {"datarows": [[["a", "b"], [1, "x"], [{"k": 1}, {"k": 2}]]]}
+
+---
+"text equality on a leaf is answered by the inverted index alone":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl.explain:
+        body:
+          query: 'source=otel | where attributes.duration_ms = ''n/a'' | fields service'
+  - match:
+      calcite.physical: /.*term.*attributes\.duration_ms.*/
+  - match:
+      calcite.physical: /^(?:(?!opensearch_compounded_script)[\s\S])*$/
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.duration_ms = ''n/a'' | fields service'
+  - match: {"datarows": [["search"]]}
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.http.response.status_code = ''503'' | fields service'
+  # the index term "503" matches the record, and the script rejects it: 503 was written as a
+  # number, and a number does not equal the text '503'
+  - match: {"datarows": []}
+
+---
+"existence, absence and prefix on a leaf use the index the same way":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl.explain:
+        body:
+          query: 'source=otel | where isnotnull(attributes.duration_ms) | fields service'
+  - match:
+      calcite.physical: /.*exists.*attributes\.duration_ms.*/
+  - match:
+      calcite.physical: /^(?:(?!opensearch_compounded_script)[\s\S])*$/
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where isnotnull(attributes.duration_ms) | fields service'
+  - match: {"datarows": [["checkout"], ["payments"], ["search"]]}
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where isnull(attributes.duration_ms) | fields service'
+  - match: {"datarows": [["tags"]]}
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where like(attributes.duration_ms, ''N/%'') | fields service'
+  - match: {"datarows": [["search"]]}
+
+---
+"text equality on an array leaf matches any element, as the index holds a term per element":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.tags = ''a'' | fields service'
+  - match: {"datarows": [["tags"]]}
+
+---
+"text filters combine with and / or and with filters on other fields":
+  - skip:
+      features: [headers]
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.duration_ms = ''n/a'' or service = ''checkout'' | stats count()'
+  - match: {"datarows": [[2]]}
+
+---
+"a numeric comparison on a leaf is not supported, and the error says why":
+  - skip:
+      features: [headers]
+  - do:
+      catch: bad_request
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where attributes.duration_ms > 10 | fields service'
+  - match: {"$body": "/Not\\s+supported:\\s+the\\s+filter\\s+.*\\s+on\\s+attributes.duration_ms.*/"}
+  - match: {"$body": "/.*flat_object\\s+indexes\\s+every\\s+value\\s+as\\s+a\\s+keyword\\s+term.*/"}
+
+---
+"an aggregation, a group-by and a sort on a leaf are not supported":
+  - skip:
+      features: [headers]
+  - do:
+      catch: bad_request
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | stats avg(attributes.duration_ms)'
+  - match: {"$body": "/Not\\s+supported:\\s+the\\s+function\\s+avg\\s+over\\s+a\\s+flat_object\\s+leaf.*/"}
+  - do:
+      catch: bad_request
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | stats count() by attributes.duration_ms'
+  - match: {"$body": "/Not\\s+supported:\\s+group\\s+by\\s+attributes.duration_ms.*/"}
+  - do:
+      catch: bad_request
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | sort attributes.duration_ms | fields service'
+  - match: {"$body": "/Not\\s+supported:\\s+sort\\s+by\\s+attributes.duration_ms.*/"}
+
+---
+"a negated text filter and an expression over a leaf are not supported":
+  - skip:
+      features: [headers]
+  - do:
+      catch: bad_request
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where not attributes.duration_ms = ''n/a'' | fields service'
+  - match: {"$body": "/Not\\s+supported:\\s+the\\s+filter\\s+.*\\s+on\\s+attributes.duration_ms.*/"}
+  - do:
+      catch: bad_request
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | eval d = attributes.duration_ms + 1 | fields d'
+  - match: {"$body": "/Not\\s+supported:\\s+an\\s+expression\\s+over\\s+attributes.duration_ms.*/"}

@@ -106,6 +106,7 @@ import org.opensearch.sql.data.type.ExprCoreType;
 import org.opensearch.sql.data.type.ExprType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchAliasType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchDataType;
+import org.opensearch.sql.opensearch.data.type.OpenSearchFlatObjectType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchTextType;
 import org.opensearch.sql.opensearch.storage.script.CalciteScriptEngine.UnsupportedScriptException;
 import org.opensearch.sql.opensearch.storage.script.CompoundedScriptEngine.ScriptEngineType;
@@ -371,6 +372,11 @@ public class PredicateAnalyzer {
         throw new PredicateAnalyzerException(message);
       }
 
+      QueryExpression leafPredicate = flatObjectLeafPredicate(call);
+      if (leafPredicate != null) {
+        return leafPredicate;
+      }
+
       switch (syntax) {
         case BINARY, INTERNAL:
           return binary(call);
@@ -401,6 +407,190 @@ public class PredicateAnalyzer {
           String message =
               format(Locale.ROOT, "Unsupported syntax [%s] for call: [%s]", syntax, call);
           throw new PredicateAnalyzerException(message);
+      }
+    }
+
+    /**
+     * A predicate on a flat_object leaf -- text equality, existence, or a prefix -- is answered by
+     * the inverted index, as the same DSL query is: the index holds every leaf as a keyword term
+     * with the path folded in ({@code attributes.duration_ms=n/a}), so a term, exists or prefix
+     * query on the dotted path is the whole answer, and no record is opened.
+     *
+     * <p>The one case the index cannot settle on its own is a leaf that keeps its type (VARIANT)
+     * compared with text that could also be the spelling of a number, a boolean or null: the number
+     * 500 and the text "500" share the term {@code 500}, and only the text is equal to {@code
+     * '500'}. There the term narrows the candidates and the script decides. A negated predicate
+     * keeps the script too, so that a record without the leaf stays excluded, as three-valued logic
+     * requires. On an array leaf the index matches any element, as Splunk's multivalue fields do.
+     * Returns null when the call is not such a predicate.
+     */
+    private @Nullable QueryExpression flatObjectLeafPredicate(RexCall call) {
+      List<RexNode> operands = call.getOperands();
+      switch (call.getKind()) {
+        case EQUALS -> {
+          for (int i = 0; i < 2; i++) {
+            FlatObjectLeaf leaf = flatObjectLeaf(operands.get(i));
+            if (leaf != null
+                && operands.get(1 - i) instanceof RexLiteral literal
+                && isText(literal)) {
+              String text = RexLiteral.stringValue(literal);
+              return new FlatObjectLeafQueryExpression(
+                  QueryBuilders.termQuery(leaf.path(), text),
+                  call,
+                  leaf.typed() && couldSpellANonTextValue(text));
+            }
+          }
+        }
+        case IS_NOT_NULL -> {
+          FlatObjectLeaf leaf = flatObjectLeaf(operands.get(0));
+          if (leaf != null) {
+            return new FlatObjectLeafQueryExpression(
+                QueryBuilders.existsQuery(leaf.path()), call, false);
+          }
+        }
+        case IS_NULL -> {
+          FlatObjectLeaf leaf = flatObjectLeaf(operands.get(0));
+          if (leaf != null) {
+            return new FlatObjectLeafQueryExpression(
+                boolQuery().mustNot(QueryBuilders.existsQuery(leaf.path())), call, false);
+          }
+        }
+        case LIKE -> {
+          FlatObjectLeaf leaf = flatObjectLeaf(operands.get(0));
+          if (leaf != null
+              && operands.get(1) instanceof RexLiteral pattern
+              && isText(pattern)
+              && call.getOperator() instanceof SqlLikeOperator like) {
+            String text = RexLiteral.stringValue(pattern);
+            // a leading literal prefix, then '%' and nothing else: a prefix query, matched
+            // case-insensitively when the operator is ILIKE
+            if (text.endsWith("%")
+                && !text.substring(0, text.length() - 1).matches(".*[%_\\\\].*")) {
+              String prefix = text.substring(0, text.length() - 1);
+              return new FlatObjectLeafQueryExpression(
+                  QueryBuilders.prefixQuery(leaf.path(), prefix)
+                      .caseInsensitive(!like.isCaseSensitive()),
+                  call,
+                  leaf.typed() && couldStartANonTextValue(prefix));
+            }
+          }
+        }
+        default -> {}
+      }
+      return null;
+    }
+
+    private static boolean isText(RexLiteral literal) {
+      return SqlTypeFamily.CHARACTER.contains(literal.getType());
+    }
+
+    /** Whether the text is how JSON spells a number, a boolean or null. */
+    private static boolean couldSpellANonTextValue(String text) {
+      if (text.equals("true") || text.equals("false") || text.equals("null")) {
+        return true;
+      }
+      try {
+        Double.parseDouble(text);
+        return true;
+      } catch (NumberFormatException e) {
+        return false;
+      }
+    }
+
+    /** Whether some number, boolean or null could start with this prefix. */
+    private static boolean couldStartANonTextValue(String prefix) {
+      return prefix.matches("[-+]?[0-9]*\\.?[0-9]*([eE][-+]?[0-9]*)?")
+          || "true".startsWith(prefix)
+          || "false".startsWith(prefix)
+          || "null".startsWith(prefix);
+    }
+
+    /** A flat_object leaf reference: its DSL path, and whether the leaf keeps its own type. */
+    private record FlatObjectLeaf(String path, boolean typed) {}
+
+    /**
+     * The flat_object leaf a node refers to -- {@code ITEM(<flat_object column>, '<key>')},
+     * possibly under a cast to a character type -- as the DSL path {@code column.key}; null for
+     * anything else.
+     */
+    private @Nullable FlatObjectLeaf flatObjectLeaf(RexNode node) {
+      while (node instanceof RexCall cast
+          && (cast.getKind() == SqlKind.CAST || cast.getKind() == SqlKind.SAFE_CAST)
+          && SqlTypeFamily.CHARACTER.contains(cast.getType())) {
+        node = cast.getOperands().get(0);
+      }
+      if (!(node instanceof RexCall item) || item.getKind() != SqlKind.ITEM) {
+        return null;
+      }
+      if (!(item.getOperands().get(0) instanceof RexInputRef ref)
+          || !(item.getOperands().get(1) instanceof RexLiteral key)
+          || !isText(key)) {
+        return null;
+      }
+      String column = ref.getIndex() < schema.size() ? schema.get(ref.getIndex()) : null;
+      if (column == null || !(fieldTypes.get(column) instanceof OpenSearchFlatObjectType)) {
+        return null;
+      }
+      boolean typed = item.getType().getSqlTypeName() == SqlTypeName.VARIANT;
+      return new FlatObjectLeaf(column + "." + RexLiteral.stringValue(key), typed);
+    }
+
+    /**
+     * An index lookup on a flat_object leaf -- the whole answer when the index is exact, and the
+     * candidate filter for the predicate's script when it is not, or when the predicate is negated.
+     */
+    class FlatObjectLeafQueryExpression extends QueryExpression {
+      private final QueryBuilder indexFilter;
+      private final RexNode node;
+      private final boolean withScript;
+      private final boolean negated;
+      private @Nullable ScriptQueryExpression script;
+      private List<RexNode> analyzedNodes;
+
+      FlatObjectLeafQueryExpression(QueryBuilder indexFilter, RexNode node, boolean withScript) {
+        this(indexFilter, node, withScript, false);
+      }
+
+      private FlatObjectLeafQueryExpression(
+          QueryBuilder indexFilter, RexNode node, boolean withScript, boolean negated) {
+        this.indexFilter = indexFilter;
+        this.node = node;
+        this.withScript = withScript;
+        this.negated = negated;
+        this.analyzedNodes = List.of(node);
+        if (withScript) {
+          this.script = new ScriptQueryExpression(node, rowType, fieldTypes, cluster, Map.of());
+          accumulateScriptCount(1);
+        }
+      }
+
+      @Override
+      public QueryBuilder builder() {
+        QueryBuilder positive =
+            withScript ? boolQuery().filter(indexFilter).filter(script.builder()) : indexFilter;
+        return negated ? boolQuery().mustNot(positive) : positive;
+      }
+
+      @Override
+      public QueryExpression not() {
+        // NOT of a leaf predicate must still exclude a record without the leaf (NOT null is null),
+        // which a must_not over the index alone would let through: keep the script.
+        return new FlatObjectLeafQueryExpression(indexFilter, node, true, !negated);
+      }
+
+      @Override
+      public List<RexNode> getAnalyzedNodes() {
+        return analyzedNodes;
+      }
+
+      @Override
+      public void updateAnalyzedNodes(RexNode rexNode) {
+        this.analyzedNodes = List.of(rexNode);
+      }
+
+      @Override
+      public List<RexNode> getUnAnalyzableNodes() {
+        return List.of();
       }
     }
 

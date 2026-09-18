@@ -45,6 +45,8 @@ public class ScriptParameterHelper {
    * <p>1 stand for SOURCE
    *
    * <p>2 stands for LITERAL
+   *
+   * <p>3 stands for FLAT_OBJECT (read from _source and flattened to dotted leaf paths)
    */
   List<Integer> sources;
 
@@ -52,7 +54,7 @@ public class ScriptParameterHelper {
    * Records the digest of each parameter, which is used as the key to retrieve the value from the
    * corresponding sources. It will be
    *
-   * <p>- field name for `DOC_VALUE` and `SOURCE`,
+   * <p>- field name for `DOC_VALUE`, `SOURCE` and `FLAT_OBJECT`,
    *
    * <p>- literal value itself for `LITERAL`
    */

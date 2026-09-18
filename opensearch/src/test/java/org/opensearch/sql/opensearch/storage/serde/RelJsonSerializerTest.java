@@ -39,6 +39,7 @@ import org.opensearch.sql.opensearch.data.type.OpenSearchBinaryType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchDataType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchDataType.MappingType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchDateType;
+import org.opensearch.sql.opensearch.data.type.OpenSearchFlatObjectType;
 
 @DisplayNameGeneration(DisplayNameGenerator.ReplaceUnderscores.class)
 public class RelJsonSerializerTest {
@@ -421,5 +422,44 @@ public class RelJsonSerializerTest {
     var exception =
         assertThrows(IllegalStateException.class, () -> serializer.deserialize(encoded));
     assertTrue(exception.getMessage().contains("Failed to deserialize"));
+  }
+
+  // A flat_object has no usable doc values and a document-dependent _source shape, so a script
+  // parameter over it must be routed to the FLAT_OBJECT source (3), keyed by the field name, and
+  // the key literal becomes an ordinary LITERAL parameter (2).
+  @Test
+  void testFlatObjectFieldIsReadFromSourceAndFlattened() {
+    RelDataType flatObjectType =
+        OpenSearchTypeFactory.convertExprTypeToRelDataType(OpenSearchFlatObjectType.of());
+    RelDataType rowTypeWithFlatObject =
+        rexBuilder
+            .getTypeFactory()
+            .builder()
+            .kind(StructKind.FULLY_QUALIFIED)
+            .add("attributes", flatObjectType)
+            .build();
+    Map<String, ExprType> fieldTypesWithFlatObject =
+        Map.of("attributes", OpenSearchFlatObjectType.of());
+    RexNode item =
+        rexBuilder.makeCall(
+            SqlStdOperatorTable.ITEM,
+            rexBuilder.makeInputRef(flatObjectType, 0),
+            rexBuilder.makeLiteral("http.response.status_code"));
+    // Character literals are widened to nullable VARCHAR when parameterized.
+    RexNode expectedNode =
+        rexBuilder.makeCall(
+            SqlStdOperatorTable.ITEM,
+            rexBuilder.makeDynamicParam(flatObjectType, 0),
+            rexBuilder.makeDynamicParam(TYPE_FACTORY.createSqlType(SqlTypeName.VARCHAR, true), 1));
+
+    final ScriptParameterHelper helper =
+        new ScriptParameterHelper(
+            rowTypeWithFlatObject.getFieldList(), fieldTypesWithFlatObject, rexBuilder);
+    String serialized = serializer.serialize(item, helper);
+    RexNode expr = serializer.deserialize(serialized);
+
+    assertEquals(expectedNode, expr);
+    assertEquals(List.of(3, 2), helper.sources);
+    assertEquals(List.of("attributes", "http.response.status_code"), helper.digests);
   }
 }
