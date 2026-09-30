@@ -10,9 +10,11 @@ import static org.opensearch.sql.calcite.utils.OpenSearchTypeFactory.TYPE_FACTOR
 import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.Stack;
 import java.util.function.BiFunction;
 import lombok.Getter;
@@ -95,6 +97,14 @@ public class CalcitePlanContext {
    * excluded.
    */
   @Getter @Setter private boolean includeMetadata = false;
+
+  /**
+   * Dotted names of the {@code flat_object} fields on the relations this query scans, recorded when
+   * each relation is bound -- the one point where the index mapping is in hand. {@link
+   * FlatObjectScopeValidator} runs over the finished plan, by which time a scan may sit behind
+   * rewrites that no longer carry the table.
+   */
+  @Getter private final Set<String> flatObjectFields = new LinkedHashSet<>();
 
   private final Stack<RexCorrelVariable> correlVar = new Stack<>();
   private final Stack<List<RexNode>> windowPartitions = new Stack<>();

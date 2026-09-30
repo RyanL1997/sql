@@ -240,7 +240,7 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     RelNode plan = unresolved.accept(this, context);
     // Here rather than in QueryService.analyze, so the unified query pipeline -- which calls this
     // method directly -- is held to the same rules.
-    FlatObjectScopeValidator.validate(plan);
+    FlatObjectScopeValidator.validate(plan, context.getFlatObjectFields());
     return plan;
   }
 
@@ -272,6 +272,7 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     }
     context.relBuilder.scan(node.getTableQualifiedName().getParts());
     RelNode scan = context.relBuilder.peek();
+    recordFlatObjectFields(scan, context);
 
     // Eagerly push down highlight config to the scan (highlight is a scan hint, not an operator)
     if (context.getHighlightConfig() != null && scan instanceof HighlightPushDown) {
@@ -287,6 +288,28 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     }
 
     return context.relBuilder.peek();
+  }
+
+  /**
+   * Notes which of a relation's fields are {@code flat_object}, for {@link
+   * FlatObjectScopeValidator}. Their leaves have no mapping of their own, so the check cannot read
+   * the type off the plan -- and here is where the index mapping is in hand.
+   */
+  private static void recordFlatObjectFields(RelNode scan, CalcitePlanContext context) {
+    RelOptTable relOptTable = scan.getTable();
+    AbstractOpenSearchTable osTable =
+        relOptTable == null ? null : relOptTable.unwrap(AbstractOpenSearchTable.class);
+    if (osTable == null) {
+      return;
+    }
+    osTable
+        .getFieldTypes()
+        .forEach(
+            (name, type) -> {
+              if ("flat_object".equalsIgnoreCase(type.legacyTypeName())) {
+                context.getFlatObjectFields().add(name);
+              }
+            });
   }
 
   // This is a tool method to add an existed RelOptTable to builder stack, not used for now

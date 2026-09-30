@@ -11,7 +11,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelVisitor;
 import org.apache.calcite.rel.core.Aggregate;
@@ -27,8 +26,6 @@ import org.apache.calcite.rex.RexShuttle;
 import org.apache.calcite.rex.RexVisitorImpl;
 import org.apache.calcite.sql.SqlKind;
 import org.checkerframework.checker.nullness.qual.Nullable;
-import org.opensearch.sql.calcite.plan.AbstractOpenSearchTable;
-import org.opensearch.sql.calcite.utils.PlanUtils;
 import org.opensearch.sql.common.error.ErrorCode;
 import org.opensearch.sql.common.error.ErrorReport;
 import org.opensearch.sql.common.error.QueryProcessingStage;
@@ -43,11 +40,11 @@ import org.opensearch.sql.common.utils.StringUtils;
  * have to open every record, which is the cost this field type exists to avoid. Such a query is
  * rejected here, while the plan is built, rather than answered slowly.
  *
- * <p>A leaf is {@code ITEM(<flat_object column>, '<path>')}. The columns are found by their mapping
- * type rather than by the type they take in the plan, because that type -- a map of text to text --
- * is also what {@code spath} produces for an extracted document. A column that a projection derived
- * from a leaf is tracked too, so that a command which sorts or groups by a leaf, projecting it into
- * a column of its own first, is caught.
+ * <p>A leaf is {@code ITEM(<flat_object column>, '<path>')}. Which columns those are is not read
+ * off the plan -- the type they take there, a map of text to text, is also what {@code spath}
+ * produces for an extracted document -- but comes from the mapping, recorded as each relation was
+ * bound. A column that a projection derived from a leaf is tracked too, so that a command which
+ * sorts or groups by a leaf, projecting it into a column of its own first, is caught.
  */
 public final class FlatObjectScopeValidator {
 
@@ -61,16 +58,15 @@ public final class FlatObjectScopeValidator {
 
   private FlatObjectScopeValidator() {}
 
-  /** Throws if the plan does anything with a flat_object field other than read it. */
-  public static void validate(RelNode plan) {
-    Set<String> fields = flatObjectFields(plan);
-    if (!fields.isEmpty()) {
-      validate(plan, fields);
+  /**
+   * Throws if the plan does anything with one of the given flat_object fields other than read it.
+   * The names come from {@link CalcitePlanContext#getFlatObjectFields()}, filled in as each
+   * relation was bound.
+   */
+  public static void validate(RelNode plan, Set<String> fields) {
+    if (fields.isEmpty()) {
+      return;
     }
-  }
-
-  /** The check itself, over a known set of flat_object column names. */
-  static void validate(RelNode plan, Set<String> fields) {
     new RelVisitor() {
       @Override
       public void visit(RelNode node, int ordinal, @Nullable RelNode parent) {
@@ -78,26 +74,6 @@ public final class FlatObjectScopeValidator {
         check(node, fields);
       }
     }.go(plan);
-  }
-
-  /** The plan's flat_object columns, by mapping type; empty when the query touches none. */
-  private static Set<String> flatObjectFields(RelNode plan) {
-    RelOptTable table = PlanUtils.findTable(plan);
-    AbstractOpenSearchTable osTable =
-        table == null ? null : table.unwrap(AbstractOpenSearchTable.class);
-    if (osTable == null) {
-      return Set.of();
-    }
-    Set<String> fields = new HashSet<>();
-    osTable
-        .getFieldTypes()
-        .forEach(
-            (name, type) -> {
-              if ("flat_object".equalsIgnoreCase(type.legacyTypeName())) {
-                fields.add(name);
-              }
-            });
-    return fields;
   }
 
   private static void check(RelNode node, Set<String> fields) {
