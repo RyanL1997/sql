@@ -100,24 +100,21 @@ public class CalcitePlanContext {
   @Getter @Setter private boolean includeMetadata = false;
 
   /**
-   * Dotted names of the {@code flat_object} fields on the relations this query scans, recorded when
-   * each relation is bound -- the one point where the index mapping is in hand. {@link
-   * FlatObjectScopeValidator} runs over the finished plan, by which time a scan may sit behind
-   * rewrites that no longer carry the table.
+   * The {@code flat_object} fields on the relations this query scans, by dotted name, recorded as
+   * each relation is bound -- the one point where the index mapping is in hand.
    */
   @Getter private final Set<String> flatObjectFields = new LinkedHashSet<>();
 
   /**
-   * Columns a command read a {@code flat_object} field or one of its leaves into, by the name the
-   * command gave them. A later command using such a column is refused the same way, since pushdown
-   * fuses the projection back into whatever reads it.
+   * Columns holding a {@code flat_object} read, mapped to the field they read. A later command
+   * using one is refused too: pushdown fuses the projection back into whatever reads it.
    */
   @Getter private final Map<String, String> flatObjectLeafColumns = new LinkedHashMap<>();
 
-  /** Whether the expression being resolved is one of the reads a flat_object field allows. */
+  /** Whether the expression being resolved is one of the reads a flat_object allows. */
   @Getter @Setter private boolean flatObjectReadAllowed = false;
 
-  /** What the command being analyzed would do with a flat_object field, for the refusal message. */
+  /** What the command would do with a flat_object, for the refusal message. */
   @Getter @Setter private String flatObjectUse = "use";
 
   private final Stack<RexCorrelVariable> correlVar = new Stack<>();

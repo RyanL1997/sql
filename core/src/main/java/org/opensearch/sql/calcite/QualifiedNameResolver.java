@@ -83,8 +83,8 @@ public class QualifiedNameResolver {
             .or(() -> resolveRenamedField(nameNode, context));
 
     if (fieldRef.isPresent()) {
-      // Every way of resolving a field converges here, so this is where a flat_object used outside
-      // what the field type answers is refused -- see FlatObjectScope.
+      // Every way of resolving a field converges here, so a flat_object used for anything the
+      // field type cannot answer is refused here. See FlatObjectScope.
       FlatObjectScope.check(nameNode.toString(), context);
       // If we're in a lambda context and this is not a lambda variable,
       // we need to capture it as an external variable

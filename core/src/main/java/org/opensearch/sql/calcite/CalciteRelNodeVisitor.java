@@ -248,10 +248,10 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
   public RelNode visitChildren(Node node, CalcitePlanContext context) {
     RelNode result = super.visitChildren(node, context);
     if (node instanceof UnresolvedPlan plan) {
-      // Materializing a dotted path is a read, so it is allowed -- and it has to be, because the
-      // materializer wraps field resolution in catch (RuntimeException | AssertionError), which
-      // would swallow a refusal raised there and leave the command quietly ignoring the field.
-      // What the command then does with the materialized column is checked where it resolves it.
+      // Materializing a dotted path is a read. It has to be resolved as one: the materializer
+      // catches RuntimeException, so a refusal raised inside would be swallowed and the field
+      // quietly ignored. What the command then does with the column is checked where it resolves
+      // it.
       FlatObjectScope.runAsRead(context, () -> mapPathMaterializer.materializePaths(plan, context));
     }
     return result;
@@ -4504,8 +4504,8 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
 
     // 2. Get the field to expand and an optional alias.
     Field arrayField = expand.getField();
-    // Resolve as a read: the check below already refuses a flat_object leaf, by the same rule it
-    // uses for an object leaf or an expression, and says so in expand's own words.
+    // Resolve as a read: the check below already refuses a flat_object leaf, by the rule it uses
+    // for an object leaf or an expression, and in expand's own words.
     RexNode resolved =
         FlatObjectScope.allowReadOf(context, () -> rexVisitor.analyze(arrayField, context));
     if (!(resolved instanceof RexInputRef arrayFieldRex)) {
