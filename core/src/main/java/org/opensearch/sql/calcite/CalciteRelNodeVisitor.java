@@ -181,7 +181,6 @@ import org.opensearch.sql.calcite.plan.rel.LogicalGraphLookup;
 import org.opensearch.sql.calcite.plan.rel.LogicalSystemLimit;
 import org.opensearch.sql.calcite.plan.rel.LogicalSystemLimit.SystemLimitType;
 import org.opensearch.sql.calcite.utils.BinUtils;
-import org.opensearch.sql.calcite.utils.FlatObjectScope;
 import org.opensearch.sql.calcite.utils.JoinAndLookupUtils;
 import org.opensearch.sql.calcite.utils.OpenSearchTypeFactory;
 import org.opensearch.sql.calcite.utils.PPLHintUtils;
@@ -238,21 +237,14 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
   }
 
   public RelNode analyze(UnresolvedPlan unresolved, CalcitePlanContext context) {
-    RelNode plan = unresolved.accept(this, context);
-    // Here rather than in QueryService.analyze, so the unified query pipeline -- which calls this
-    // method directly -- is held to the same rules.
-    return plan;
+    return unresolved.accept(this, context);
   }
 
   @Override
   public RelNode visitChildren(Node node, CalcitePlanContext context) {
     RelNode result = super.visitChildren(node, context);
     if (node instanceof UnresolvedPlan plan) {
-      // Materializing a dotted path is a read. It has to be resolved as one: the materializer
-      // catches RuntimeException, so a refusal raised inside would be swallowed and the field
-      // quietly ignored. What the command then does with the column is checked where it resolves
-      // it.
-      FlatObjectScope.runAsRead(context, () -> mapPathMaterializer.materializePaths(plan, context));
+      mapPathMaterializer.materializePaths(plan, context);
     }
     return result;
   }
@@ -276,7 +268,6 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     }
     context.relBuilder.scan(node.getTableQualifiedName().getParts());
     RelNode scan = context.relBuilder.peek();
-    recordFlatObjectFields(scan, context);
 
     // Eagerly push down highlight config to the scan (highlight is a scan hint, not an operator)
     if (context.getHighlightConfig() != null && scan instanceof HighlightPushDown) {
@@ -292,28 +283,6 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     }
 
     return context.relBuilder.peek();
-  }
-
-  /**
-   * Notes which of a relation's fields are {@code flat_object}, for {@link
-   * FlatObjectScopeValidator}. Their leaves have no mapping of their own, so the check cannot read
-   * the type off the plan -- and here is where the index mapping is in hand.
-   */
-  private static void recordFlatObjectFields(RelNode scan, CalcitePlanContext context) {
-    RelOptTable relOptTable = scan.getTable();
-    AbstractOpenSearchTable osTable =
-        relOptTable == null ? null : relOptTable.unwrap(AbstractOpenSearchTable.class);
-    if (osTable == null) {
-      return;
-    }
-    osTable
-        .getFieldTypes()
-        .forEach(
-            (name, type) -> {
-              if ("flat_object".equalsIgnoreCase(type.legacyTypeName())) {
-                context.getFlatObjectFields().add(name);
-              }
-            });
   }
 
   // This is a tool method to add an existed RelOptTable to builder stack, not used for now
@@ -373,9 +342,7 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
       context.relBuilder.variable(v::set);
       context.pushCorrelVar(v.get());
     }
-    RexNode condition =
-        FlatObjectScope.as(
-            "filter by", context, () -> rexVisitor.analyze(node.getCondition(), context));
+    RexNode condition = rexVisitor.analyze(node.getCondition(), context);
     if (containsSubqueryExpression) {
       context.relBuilder.filter(ImmutableList.of(v.get().id), condition);
       context.popCorrelVar();
@@ -618,9 +585,7 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
             }
             matchingFields.forEach(f -> expandedFields.add(context.relBuilder.field(f)));
           } else if (addedFields.add(fieldName)) {
-            RexNode resolved =
-                FlatObjectScope.allowRead(
-                    field, fieldName, context, () -> rexVisitor.analyze(field, context));
+            RexNode resolved = rexVisitor.analyze(field, context);
             /*
              * Dotted path access is resolved into ITEM(map, path) function call without aliasing.
              * Re-apply the alias so the projected column retains the user-visible name.
@@ -809,7 +774,6 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
         String newName =
             WildcardRenameUtils.applyWildcardTransformation(
                 sourcePattern, targetPattern, fieldName);
-        FlatObjectScope.trackRename(fieldName, newName, context);
         if (newNames.contains(newName) && !newName.equals(fieldName)) {
           removeFieldIfExists(newName, newNames, context);
         }
@@ -838,27 +802,23 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
   public RelNode visitSort(org.opensearch.sql.ast.tree.Sort node, CalcitePlanContext context) {
     visitChildren(node, context);
     List<RexNode> sortList =
-        FlatObjectScope.as(
-            "sort by",
-            context,
-            () ->
-                node.getSortList().stream()
-                    .map(
-                        expr -> {
-                          RexNode sortField = rexVisitor.analyze(expr, context);
-                          SortOption sortOption = analyzeSortOption(expr.getFieldArgs());
-                          // Default is ASC
-                          if (sortOption.getSortOrder() == DESC) {
-                            sortField = context.relBuilder.desc(sortField);
-                          }
-                          if (sortOption.getNullOrder() == NULL_LAST) {
-                            sortField = context.relBuilder.nullsLast(sortField);
-                          } else {
-                            sortField = context.relBuilder.nullsFirst(sortField);
-                          }
-                          return sortField;
-                        })
-                    .collect(Collectors.toList()));
+        node.getSortList().stream()
+            .map(
+                expr -> {
+                  RexNode sortField = rexVisitor.analyze(expr, context);
+                  SortOption sortOption = analyzeSortOption(expr.getFieldArgs());
+                  // Default is ASC
+                  if (sortOption.getSortOrder() == DESC) {
+                    sortField = context.relBuilder.desc(sortField);
+                  }
+                  if (sortOption.getNullOrder() == NULL_LAST) {
+                    sortField = context.relBuilder.nullsLast(sortField);
+                  } else {
+                    sortField = context.relBuilder.nullsFirst(sortField);
+                  }
+                  return sortField;
+                })
+            .collect(Collectors.toList());
     context.relBuilder.sort(sortList);
     // Apply count parameter as limit
     if (node.getCount() != 0) {
@@ -1305,12 +1265,7 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
                 context.relBuilder.variable(v::set);
                 context.pushCorrelVar(v.get());
               }
-              RexNode eval =
-                  FlatObjectScope.allowRead(
-                      expr,
-                      expr.getVar().getField().toString(),
-                      context,
-                      () -> rexVisitor.analyze(expr, context));
+              RexNode eval = rexVisitor.analyze(expr, context);
               if (containsSubqueryExpression) {
                 // RelBuilder.projectPlus doesn't have a parameter with variablesSet:
                 // projectPlus(Iterable<CorrelationId> variablesSet, RexNode... nodes)
@@ -1820,8 +1775,7 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
     if (!bucketNullable) {
       nonNullGroupMask.set(0, nGroup);
     }
-    FlatObjectScope.runAs(
-        "stats by", context, () -> visitAggregation(node, context, nonNullGroupMask, true, false));
+    visitAggregation(node, context, nonNullGroupMask, true, false);
     return context.relBuilder.peek();
   }
 
@@ -2292,7 +2246,6 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
 
   @Override
   public RelNode visitDedupe(Dedupe node, CalcitePlanContext context) {
-    context.setFlatObjectUse("dedup by");
     visitChildren(node, context);
     List<Argument> options = node.getOptions();
     Integer allowedDuplication = (Integer) options.get(0).getValue().getValue();
@@ -4504,10 +4457,7 @@ public class CalciteRelNodeVisitor extends AbstractNodeVisitor<RelNode, CalciteP
 
     // 2. Get the field to expand and an optional alias.
     Field arrayField = expand.getField();
-    // Resolve as a read: the check below already refuses a flat_object leaf, by the rule it uses
-    // for an object leaf or an expression, and in expand's own words.
-    RexNode resolved =
-        FlatObjectScope.allowReadOf(context, () -> rexVisitor.analyze(arrayField, context));
+    RexNode resolved = rexVisitor.analyze(arrayField, context);
     if (!(resolved instanceof RexInputRef arrayFieldRex)) {
       // Anything that is not a column of the input -- a leaf of an object or a flat_object field,
       // an expression -- has no column to correlate the expansion with. Raised the way the

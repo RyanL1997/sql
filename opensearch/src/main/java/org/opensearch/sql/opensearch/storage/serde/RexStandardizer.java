@@ -43,7 +43,6 @@ import org.opensearch.sql.opensearch.data.type.OpenSearchBinaryType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchFlatObjectType;
 import org.opensearch.sql.opensearch.data.type.OpenSearchTextType;
 import org.opensearch.sql.opensearch.storage.script.CalciteScriptEngine.Source;
-import org.opensearch.sql.opensearch.storage.script.CalciteScriptEngine.UnsupportedScriptException;
 
 /**
  * This help standardizes the RexNode expression, the process including:
@@ -112,18 +111,12 @@ public class RexStandardizer extends RexBiVisitorImpl<RexNode, ScriptParameterHe
     String docFieldName =
         exprType == ExprCoreType.STRUCT
                 || exprType == ExprCoreType.ARRAY
-                // A binary field has no doc values, so it has to be read from _source too.
+                // A binary field has no doc values, so it has to be read from _source too, and
+                // neither does a flat_object: each leaf is one folded path=value term.
                 || exprType instanceof OpenSearchBinaryType
+                || exprType instanceof OpenSearchFlatObjectType
             ? null
             : OpenSearchTextType.toKeywordSubField(field.getName(), exprType);
-    if (exprType instanceof OpenSearchFlatObjectType) {
-      // Each leaf is indexed as one folded path=value term, so a flat_object has no doc values a
-      // script could read: it would have to open _source for every record it is asked about, the
-      // cost the field type exists to avoid. A script over one is refused rather than built, unlike
-      // the no-doc-values types above, which are read from _source that way on purpose.
-      throw new UnsupportedScriptException(
-          "A flat_object field cannot be read by a pushed-down script: " + field.getName());
-    }
     int newIndex = helper.sources.size();
     if (docFieldName != null) {
       helper.digests.add(docFieldName);

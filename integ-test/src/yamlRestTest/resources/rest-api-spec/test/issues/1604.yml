@@ -118,39 +118,42 @@ teardown:
   - match: {"datarows": [[4.0, "STRING"]]}
 
 ---
-"anything other than reading a leaf is rejected when the query is planned":
+# A leaf is text, so PPL does with it what it does with any text column -- the same as a field
+# spath extracted from a JSON string.
+"a leaf can be filtered, sorted and aggregated like any text column":
   - skip:
       features: [headers]
   - do:
-      catch: bad_request
-      headers: {Content-Type: 'application/json'}
-      ppl:
-        body:
-          query: 'source=otel | sort attributes.duration_ms | fields service'
-  - match: {"$body": "/Cannot\\s+sort\\s+by\\s+attributes.duration_ms.*/"}
-  - match: {"$body": "/.*can\\s+only\\s+be\\s+read.*/"}
-  - match: {"$body": "/.*docs.opensearch.org\\/latest\\/mappings\\/supported-field-types\\/flat-object.*/"}
-  - do:
-      catch: bad_request
-      headers: {Content-Type: 'application/json'}
-      ppl:
-        body:
-          query: 'source=otel | stats count() by attributes.duration_ms'
-  - match: {"$body": "/Cannot\\s+stats\\s+by\\s+attributes.duration_ms.*/"}
-  - do:
-      catch: bad_request
       headers: {Content-Type: 'application/json'}
       ppl:
         body:
           query: 'source=otel | where attributes.duration_ms = ''4'' | fields service'
-  - match: {"$body": "/Cannot\\s+filter\\s+by\\s+attributes.duration_ms.*/"}
+  - match: {"datarows": [["payments"]]}
   - do:
-      catch: bad_request
       headers: {Content-Type: 'application/json'}
       ppl:
         body:
-          query: 'source=otel | eval d = attributes.duration_ms + 1 | fields d'
-  - match: {"$body": "/Cannot\\s+compute\\s+a\\s+value\\s+from\\s+attributes.duration_ms.*/"}
+          query: 'source=otel | where attributes.duration_ms > 5 | fields service'
+  - match: {"datarows": [["checkout"]]}
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | stats avg(attributes.duration_ms)'
+  - match: {"datarows": [[8.25]]}
+  - do:
+      headers: {Content-Type: 'application/json'}
+      ppl:
+        body:
+          query: 'source=otel | where isnotnull(attributes.duration_ms) | sort attributes.duration_ms | fields attributes.duration_ms'
+  - match: {"datarows": [["12.5"], ["4"]]}
+
+---
+# expand needs a column of the input to correlate the expansion with. A leaf is not one, so it is
+# reported the way the mvexpand check reports it rather than as a ClassCastException.
+"expand does not take a leaf":
+  - skip:
+      features: [headers]
   - do:
       catch: bad_request
       headers: {Content-Type: 'application/json'}

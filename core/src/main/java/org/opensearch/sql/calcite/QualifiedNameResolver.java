@@ -17,7 +17,6 @@ import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.sql.ast.expression.QualifiedName;
-import org.opensearch.sql.calcite.utils.FlatObjectScope;
 import org.opensearch.sql.common.error.ErrorCode;
 import org.opensearch.sql.common.error.ErrorReport;
 import org.opensearch.sql.common.utils.StringUtils;
@@ -83,9 +82,6 @@ public class QualifiedNameResolver {
             .or(() -> resolveRenamedField(nameNode, context));
 
     if (fieldRef.isPresent()) {
-      // Every way of resolving a field converges here, so a flat_object used for anything the
-      // field type cannot answer is refused here. See FlatObjectScope.
-      FlatObjectScope.check(nameNode.toString(), context);
       // If we're in a lambda context and this is not a lambda variable,
       // we need to capture it as an external variable
       if (context.isInLambdaContext()) {
