@@ -10,6 +10,7 @@ import static org.opensearch.sql.calcite.utils.OpenSearchTypeFactory.TYPE_FACTOR
 import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -105,6 +106,19 @@ public class CalcitePlanContext {
    * rewrites that no longer carry the table.
    */
   @Getter private final Set<String> flatObjectFields = new LinkedHashSet<>();
+
+  /**
+   * Columns a command read a {@code flat_object} field or one of its leaves into, by the name the
+   * command gave them. A later command using such a column is refused the same way, since pushdown
+   * fuses the projection back into whatever reads it.
+   */
+  @Getter private final Map<String, String> flatObjectLeafColumns = new LinkedHashMap<>();
+
+  /** Whether the expression being resolved is one of the reads a flat_object field allows. */
+  @Getter @Setter private boolean flatObjectReadAllowed = false;
+
+  /** What the command being analyzed would do with a flat_object field, for the refusal message. */
+  @Getter @Setter private String flatObjectUse = "use";
 
   private final Stack<RexCorrelVariable> correlVar = new Stack<>();
   private final Stack<List<RexNode>> windowPartitions = new Stack<>();
