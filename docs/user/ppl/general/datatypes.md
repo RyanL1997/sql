@@ -113,6 +113,25 @@ A string is a sequence of characters enclosed in either single or double quotes.
 ## Query Struct Data Types  
 
 In PPL, the Struct Data Types corresponding to the [Object field type in OpenSearch](https://opensearch.org/docs/latest/field-types/supported-field-types/object/). The "." is used as the path selector when access the inner attribute of the struct data.
+
+A [flat_object field](https://docs.opensearch.org/latest/mappings/supported-field-types/flat-object/) is also presented as a struct, keyed by the dotted path of each leaf. A flat_object declares no sub-fields, so a leaf has no type of its own: every value reads as text, and a path holding more than one value reads as their JSON. This is the rule `spath` already applies to a JSON string, and `typeof` on a leaf reports `string`.
+
+Both a nested object and a literal dotted key reach the same leaf: `{"a": {"b": 1}}` and `{"a.b": 1}` each give the entry `a.b` with the value `"1"`. A path receives more than one value when it comes from an array, from several elements of an array of objects, or from both spellings of the same path appearing in one document; it then reads as a JSON array of those texts, in the order the document wrote them.
+
+What a query can do with a flat_object leaf is what the field type itself can do: PPL inherits the field type's [limitations](https://docs.opensearch.org/latest/mappings/supported-field-types/flat-object/#limitations). The index files every leaf value as a keyword term with the path folded in and gives the leaf no mapping, so a leaf can be read, but nothing can be computed from it without opening every record -- the cost this field type exists to avoid.
+
+Supported on a leaf:
+
+- reading it, or the whole field;
+- casting it, which is how a query asks for a leaf as a number: `eval ms = cast(attributes.duration_ms as double)`.
+
+Not supported on a leaf. These are rejected when the query is planned, with an error that names the field and links to the field type's documentation:
+
+- filtering by it;
+- aggregating it, or grouping by it;
+- sorting by it;
+- computing a value from it, such as a function or an arithmetic expression;
+- expanding it.
 ### Example: People  
 
 There are three fields in test index `people`: 1) deep nested object field `city`; 2) object field of array value `account`; 3) nested field `projects`
