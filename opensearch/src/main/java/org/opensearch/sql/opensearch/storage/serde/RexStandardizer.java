@@ -117,9 +117,10 @@ public class RexStandardizer extends RexBiVisitorImpl<RexNode, ScriptParameterHe
             ? null
             : OpenSearchTextType.toKeywordSubField(field.getName(), exprType);
     if (exprType instanceof OpenSearchFlatObjectType) {
-      // A flat_object has no usable doc values (each is the folded path=value term), so a script
-      // could only read it from _source, which means opening every record -- and the field type
-      // does not support Painless for retrieving subfield values either.
+      // Each leaf is indexed as one folded path=value term, so a flat_object has no doc values a
+      // script could read: it would have to open _source for every record it is asked about, the
+      // cost the field type exists to avoid. A script over one is refused rather than built, unlike
+      // the no-doc-values types above, which are read from _source that way on purpose.
       throw new UnsupportedScriptException(
           "A flat_object field cannot be read by a pushed-down script: " + field.getName());
     }
