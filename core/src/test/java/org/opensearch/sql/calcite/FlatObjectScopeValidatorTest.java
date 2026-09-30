@@ -163,6 +163,20 @@ class FlatObjectScopeValidatorTest {
         "Cannot sort by attributes");
   }
 
+  // Reading a leaf as a number is allowed, so a cast is stripped when deciding that -- and it has to
+  // be stripped just the same when noting which column the read went into. Otherwise the column
+  // sorts by a leaf unchecked and the failure surfaces from pushdown, as a 500.
+  @Test
+  void sortingByACastLeafIsRejected() {
+    RexNode asDouble =
+        rexBuilder.makeCast(
+            TYPE_FACTORY.createSqlType(SqlTypeName.DOUBLE), leaf("duration_ms"), true, true);
+    rejected(
+        LogicalSort.create(
+            project(field(0), asDouble), RelCollations.of(new RelFieldCollation(1)), null, null),
+        "Cannot sort by attributes.duration_ms");
+  }
+
   @Test
   void groupingByALeafIsRejected() {
     RelNode projected = project(field(0), leaf("status_code"));

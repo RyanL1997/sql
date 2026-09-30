@@ -158,7 +158,7 @@ public final class FlatObjectScopeValidator {
         List<RelDataTypeField> below = inputFields(project);
         List<RexNode> projects = project.getProjects();
         for (int i = 0; i < projects.size(); i++) {
-          RexNode expression = projects.get(i);
+          RexNode expression = stripCasts(projects.get(i));
           boolean fromField =
               isLeafRef(expression, below, fields)
                   || (expression instanceof RexInputRef ref
@@ -178,16 +178,26 @@ public final class FlatObjectScopeValidator {
    * text, so converting it is the parse a caller would do anyway, the value comes from {@code
    * _source} either way, and it is how a query asks for a leaf as a number.
    */
-  private static boolean isRead(
-      RexNode node, List<RelDataTypeField> inputFields, Set<String> fields, Set<Integer> leaves) {
-    if (node instanceof RexInputRef) {
-      return true;
-    }
+  /**
+   * Unwraps the casts a read may wear. {@code isRead} and {@link #leafColumns} have to agree on
+   * what counts as reading a leaf: a column one of them lets through while the other does not track
+   * is a column that reaches pushdown, where a script over a flat_object cannot be built.
+   */
+  private static RexNode stripCasts(RexNode node) {
     RexNode read = node;
     while (read instanceof RexCall cast
         && (cast.getKind() == SqlKind.CAST || cast.getKind() == SqlKind.SAFE_CAST)) {
       read = cast.getOperands().get(0);
     }
+    return read;
+  }
+
+  private static boolean isRead(
+      RexNode node, List<RelDataTypeField> inputFields, Set<String> fields, Set<Integer> leaves) {
+    if (node instanceof RexInputRef) {
+      return true;
+    }
+    RexNode read = stripCasts(node);
     return isLeafRef(read, inputFields, fields)
         || (read instanceof RexInputRef ref && leaves.contains(ref.getIndex()));
   }
@@ -262,7 +272,7 @@ public final class FlatObjectScopeValidator {
       RelNode node, List<RelDataTypeField> inputFields, int index, Set<String> fields) {
     if (!node.getInputs().isEmpty() && node.getInput(0) instanceof Project project) {
       List<RelDataTypeField> below = inputFields(project);
-      RexNode expression = project.getProjects().get(index);
+      RexNode expression = stripCasts(project.getProjects().get(index));
       if (isLeafRef(expression, below, fields)) {
         return leafName((RexCall) expression, below);
       }
