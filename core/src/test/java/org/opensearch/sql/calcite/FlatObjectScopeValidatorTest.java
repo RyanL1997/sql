@@ -163,7 +163,8 @@ class FlatObjectScopeValidatorTest {
         "Cannot sort by attributes");
   }
 
-  // Reading a leaf as a number is allowed, so a cast is stripped when deciding that -- and it has to
+  // Reading a leaf as a number is allowed, so a cast is stripped when deciding that -- and it has
+  // to
   // be stripped just the same when noting which column the read went into. Otherwise the column
   // sorts by a leaf unchecked and the failure surfaces from pushdown, as a 500.
   @Test

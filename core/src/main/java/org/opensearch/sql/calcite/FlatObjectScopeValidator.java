@@ -40,13 +40,21 @@ import org.opensearch.sql.common.utils.StringUtils;
  * have to open every record, which is the cost this field type exists to avoid. Such a query is
  * rejected here, while the plan is built, rather than answered slowly.
  *
+ * <p>This runs over the finished plan rather than throwing from {@link QualifiedNameResolver} where
+ * a leaf reference is built, the way an unsupported command is rejected from {@code visitX}. Field
+ * resolution is not a safe place to reject from: {@code MapPathPreMaterializer}, which every plan
+ * node passes through, wraps it in {@code catch (RuntimeException | AssertionError)} and logs at
+ * debug, so a rejection raised there is dropped for {@code rename}, {@code fillnull}, {@code
+ * replace}, {@code rare}, {@code top}, {@code lookup} and {@code join}, and the query goes on to
+ * fail in pushdown instead. The finished plan is downstream of that.
+ *
  * <p>A leaf is {@code ITEM(<flat_object column>, '<path>')}. Which columns those are is not read
  * off the plan -- the type they take there, a map of text to text, is also what {@code spath}
  * produces for an extracted document -- but comes from the mapping, recorded as each relation was
  * bound. A column that a projection derived from a leaf is tracked too, so that a command which
  * sorts or groups by a leaf, projecting it into a column of its own first, is caught.
  */
-public final class FlatObjectScopeValidator {
+final class FlatObjectScopeValidator {
 
   private static final String DOC_URL =
       "https://docs.opensearch.org/latest/mappings/supported-field-types/flat-object/";
@@ -63,7 +71,7 @@ public final class FlatObjectScopeValidator {
    * The names come from {@link CalcitePlanContext#getFlatObjectFields()}, filled in as each
    * relation was bound.
    */
-  public static void validate(RelNode plan, Set<String> fields) {
+  static void validate(RelNode plan, Set<String> fields) {
     if (fields.isEmpty()) {
       return;
     }
